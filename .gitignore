@@ -1,0 +1,22 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# desloppify / editor local state
+.desloppify/
+.cursor/
+.antigravitycli/
+scorecard.png
+
+# Regenerated ACRONYM full-catalog cache (absolute local paths)
+data/acronym_dishware_manifest.json
+# Gallery screenshots
+data/dishware_gallery.png
+data/*.png

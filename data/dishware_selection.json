@@ -1,0 +1,141 @@
+{
+  "n_train": 3,
+  "n_test": 2,
+  "categories": [
+    "Plate",
+    "Bowl",
+    "Cup",
+    "Mug"
+  ],
+  "objects": {
+    "Plate": [
+      {
+        "mesh_hash": "17079f40cfdc719a3f7d5255ff865380",
+        "scale": "0.01525481255900328",
+        "split": "train",
+        "rank": 1
+      },
+      {
+        "mesh_hash": "17e958fa60740e4c3c143af07c12991a",
+        "scale": "0.12793367087500215",
+        "split": "train",
+        "rank": 2
+      },
+      {
+        "mesh_hash": "3b8cd62e5842a4c98870030ed2672a1d",
+        "scale": "0.020622953752827418",
+        "split": "train",
+        "rank": 3
+      },
+      {
+        "mesh_hash": "1389e932a2c776d83c143af07c12991a",
+        "scale": "0.003642250842936652",
+        "split": "test",
+        "rank": 1
+      },
+      {
+        "mesh_hash": "49675b82efc7dd0536c38c6865b8d471",
+        "scale": "0.012386331870722115",
+        "split": "test",
+        "rank": 2
+      }
+    ],
+    "Bowl": [
+      {
+        "mesh_hash": "2efc35a3625fa50961a9876fa6384765",
+        "scale": "0.0162901045192541",
+        "split": "train",
+        "rank": 1
+      },
+      {
+        "mesh_hash": "6a772d12b98ab61dc26651d9d35b77ca",
+        "scale": "0.011314203557253731",
+        "split": "train",
+        "rank": 2
+      },
+      {
+        "mesh_hash": "68582543c4c6d0bccfdfe3f21f42a111",
+        "scale": "0.01738179439693198",
+        "split": "train",
+        "rank": 3
+      },
+      {
+        "mesh_hash": "960c5c5bff2d3a4bbced73c51e99f8b2",
+        "scale": "0.02048968292213743",
+        "split": "test",
+        "rank": 1
+      },
+      {
+        "mesh_hash": "8eab5598b81afd7bab5b523beb03efcd",
+        "scale": "0.016465111202245027",
+        "split": "test",
+        "rank": 2
+      }
+    ],
+    "Cup": [
+      {
+        "mesh_hash": "f9244dc91aebf77ba4c322790a683350",
+        "scale": "0.013126994165127772",
+        "split": "train",
+        "rank": 1
+      },
+      {
+        "mesh_hash": "8bb91bf0bfedeea1f29c5890b07f3a65",
+        "scale": "0.019445233317767943",
+        "split": "train",
+        "rank": 2
+      },
+      {
+        "mesh_hash": "d8ea3aa39bcb162798910e50f05b8001",
+        "scale": "0.004528950771537659",
+        "split": "train",
+        "rank": 3
+      },
+      {
+        "mesh_hash": "64ce0c349a57f9ca488887a53f46a53",
+        "scale": "0.015469600907267135",
+        "split": "test",
+        "rank": 1
+      },
+      {
+        "mesh_hash": "fbd39539ca4b2a124e23e9314af9ae57",
+        "scale": "0.03649509548607376",
+        "split": "test",
+        "rank": 2
+      }
+    ],
+    "Mug": [
+      {
+        "mesh_hash": "10f6e09036350e92b3f21f1137c3c347",
+        "scale": "0.0002682457830986903",
+        "split": "train",
+        "rank": 1
+      },
+      {
+        "mesh_hash": "128ecbc10df5b05d96eaf1340564a4de",
+        "scale": "0.0013421115752322193",
+        "split": "train",
+        "rank": 2
+      },
+      {
+        "mesh_hash": "159e56c18906830278d8f8c02c47cde0",
+        "scale": "0.04226213061335679",
+        "split": "train",
+        "rank": 3
+      },
+      {
+        "mesh_hash": "187859d3c3a2fd23f54e1b6f41fdd78a",
+        "scale": "0.026361220901560414",
+        "split": "test",
+        "rank": 1
+      },
+      {
+        "mesh_hash": "1ea9ea99ac8ed233bf355ac8109b9988",
+        "scale": "0.00016407252808445613",
+        "split": "test",
+        "rank": 2
+      }
+    ]
+  },
+  "notes": "Edit mesh_hash/scale to swap assets. train ranks 1-3 = regular usage; test ranks 1-2 = new-env testing. Bowls/Cups are curated to be empty (no food/utensils in the mesh). Run: python render_dishware_gallery.py"
+}

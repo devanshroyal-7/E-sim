@@ -1,0 +1,25 @@
+[project]
+name = "egraph"
+version = "0.1.0"
+description = "ManiSkill table-bussing with curated ACRONYM dishware"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "mani-skill>=3.0.1",
+    "h5py>=3.10",
+    "trimesh>=4.0",
+    "pillow>=10.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+pythonpath = ["."]
+markers = [
+    "integration: tests that need a live ACRONYM tree and/or ManiSkill sim",
+]
