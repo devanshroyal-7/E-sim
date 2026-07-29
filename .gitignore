@@ -16,7 +16,11 @@ wheels/
 scorecard.png
 
 # Regenerated ACRONYM full-catalog cache (absolute local paths)
+# (paths cover both active and archived table-bussing layouts)
 data/acronym_dishware_manifest.json
+archive/table_bussing/data/acronym_dishware_manifest.json
 # Gallery screenshots
 data/dishware_gallery.png
 data/*.png
+archive/table_bussing/data/dishware_gallery.png
+archive/table_bussing/data/*.png
