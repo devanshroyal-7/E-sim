@@ -9,6 +9,9 @@ wheels/
 # Virtual environments
 .venv
 
+# Latest planner output (rewritten by main.py)
+last_plan.txt
+
 # desloppify / editor local state
 .desloppify/
 .cursor/
