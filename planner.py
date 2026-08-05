@@ -177,10 +177,8 @@ class SimPlanner:
         tcp = self._to_numpy(obs_extra["tcp_pose"])
         tcp_to_obj = float(np.linalg.norm(tcp[:, :2] - obj[:, :2]))
 
-        goal_p = self._to_numpy(self.env.unwrapped.goal_tee.pose.p).reshape(-1)
-        goal_q = self._to_numpy(self.env.unwrapped.goal_tee.pose.q).reshape(-1)
-        goal_pose = np.concatenate([goal_p, goal_q])
-
+        goal_pose = self._to_numpy(self.env.unwrapped.goal_tee.pose.raw_pose.reshape(-1))  # mani_skill pose -> numpy (7)
+        
         current = self._landmarks_world_xy(obj)
         goal = self._landmarks_world_xy(goal_pose)
         pose_err = float(np.mean(np.linalg.norm(current - goal, axis=-1)))
