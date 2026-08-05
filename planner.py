@@ -7,13 +7,13 @@ from tqdm import tqdm
 # Body-frame T corners (COM 0.0375 already subtracted), matching ManiSkill PushT.
 TEE_LANDMARKS_XY = np.array(
     [
-        [-0.1, -0.0125],
         [0.1, -0.0125],
-        [-0.1, -0.0625],
         [0.1, -0.0625],
+        [-0.1, -0.0625],
+        [-0.1, -0.0125],
+        [-0.025, -0.0125],
         [-0.025, 0.1375],
         [0.025, 0.1375],
-        [-0.025, -0.0125],
         [0.025, -0.0125],
     ],
     dtype=np.float64,
