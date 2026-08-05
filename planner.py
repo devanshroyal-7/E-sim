@@ -1,7 +1,5 @@
 import heapq
-import math
 import time
-from typing import Union
 
 import numpy as np
 from tqdm import tqdm
@@ -22,8 +20,7 @@ TEE_LANDMARKS_XY = np.array(
 )
 
 G_STEP_COST = 0.03
-H_WEIGHT = 5.0
-_G_EPS = 1e-12
+H_WEIGHT = 1.0
 
 
 class SearchNode:
@@ -37,82 +34,9 @@ class SearchNode:
         self.f_value = g_value + H_WEIGHT * h_value
         self.state_key = state_key
         self.intersection = intersection
-
+    
     def __lt__(self, other):
         return self.f_value < other.f_value
-
-
-class OpenListPolicy:
-    """Strategy for open/closed duplicate handling during search."""
-
-    def should_expand(self, node: SearchNode, closed: set) -> bool:
-        raise NotImplementedError
-
-    def on_expand(self, node: SearchNode, closed: set) -> None:
-        raise NotImplementedError
-
-    def should_push_child(self, child: SearchNode, closed: set) -> bool:
-        raise NotImplementedError
-
-
-class BaseAStarPolicy(OpenListPolicy):
-    """Closed-set A*: skip closed keys on pop and when generating children."""
-
-    def should_expand(self, node: SearchNode, closed: set) -> bool:
-        return node.state_key not in closed
-
-    def on_expand(self, node: SearchNode, closed: set) -> None:
-        closed.add(node.state_key)
-
-    def should_push_child(self, child: SearchNode, closed: set) -> bool:
-        return child.state_key not in closed
-
-
-class BestGLazyDiscardPolicy(OpenListPolicy):
-    """Best-g map with lazy stale discard on pop and reopen on better g."""
-
-    def __init__(self, root_key, root_g: float = 0.0):
-        self.best_g = {root_key: root_g}
-
-    def should_expand(self, node: SearchNode, closed: set) -> bool:
-        best = self.best_g.get(node.state_key, math.inf)
-        if node.g_value > best + _G_EPS:
-            return False
-        if node.state_key in closed:
-            return False
-        return True
-
-    def on_expand(self, node: SearchNode, closed: set) -> None:
-        closed.add(node.state_key)
-        prev = self.best_g.get(node.state_key, math.inf)
-        if node.g_value < prev:
-            self.best_g[node.state_key] = node.g_value
-
-    def should_push_child(self, child: SearchNode, closed: set) -> bool:
-        prev = self.best_g.get(child.state_key, math.inf)
-        if child.g_value >= prev - _G_EPS:
-            return False
-        self.best_g[child.state_key] = child.g_value
-        closed.discard(child.state_key)
-        return True
-
-
-def resolve_open_policy(
-    open_policy: Union[str, OpenListPolicy],
-    root_key=None,
-    root_g: float = 0.0,
-) -> OpenListPolicy:
-    if isinstance(open_policy, OpenListPolicy):
-        return open_policy
-    if open_policy == "base":
-        return BaseAStarPolicy()
-    if open_policy == "best-g":
-        if root_key is None:
-            raise ValueError("root_key is required for best-g open policy")
-        return BestGLazyDiscardPolicy(root_key, root_g=root_g)
-    raise ValueError(
-        f"Unknown open_policy {open_policy!r}; expected 'base', 'best-g', or OpenListPolicy"
-    )
 
 
 class SimPlanner:
@@ -121,7 +45,9 @@ class SimPlanner:
         self.K = K_substeps
         self.step_size = step_size
         self.action_primitives = self._build_action_primitives(step_size)
-
+        self.goal_pose = self._to_numpy(self.env.unwrapped.goal_tee.pose.raw_pose.reshape(-1))
+        self.goal_landmarks = self._landmarks_world_xy(self.goal_pose)
+    
     def _build_action_primitives(self, step_size):
         s = step_size
         d = s / np.sqrt(2)
@@ -176,12 +102,10 @@ class SimPlanner:
         obj = self._to_numpy(obs_extra["obj_pose"])
         tcp = self._to_numpy(obs_extra["tcp_pose"])
         tcp_to_obj = float(np.linalg.norm(tcp[:, :2] - obj[:, :2]))
-
-        goal_pose = self._to_numpy(self.env.unwrapped.goal_tee.pose.raw_pose.reshape(-1))  # mani_skill pose -> numpy (7)
         
         current = self._landmarks_world_xy(obj)
-        goal = self._landmarks_world_xy(goal_pose)
-        pose_err = float(np.mean(np.linalg.norm(current - goal, axis=-1)))
+        
+        pose_err = float(np.mean(np.linalg.norm(current - self.goal_landmarks, axis=-1)))
         return pose_err + 0.25 * tcp_to_obj
 
     def _clone_state(self, state):
@@ -213,12 +137,7 @@ class SimPlanner:
             return best_inter_node
         return best_h_node
 
-    def plan(
-        self,
-        max_expansions=200,
-        threshold_value=None,
-        open_policy: Union[str, OpenListPolicy] = "base",
-    ):
+    def plan(self, max_expansions=200, threshold_value=None):
         if threshold_value is None:
             threshold_value = float(self.env.unwrapped.intersection_thresh)
 
@@ -233,8 +152,6 @@ class SimPlanner:
         root_node = SearchNode(
             root_state, [], 0.0, root_heuristic, root_key, intersection=root_inter
         )
-
-        policy = resolve_open_policy(open_policy, root_key=root_key, root_g=0.0)
 
         open_list = []
         closed_list = set()
@@ -251,9 +168,9 @@ class SimPlanner:
                     break
 
                 current_node = heapq.heappop(open_list)
-                if not policy.should_expand(current_node, closed_list):
+                if current_node.state_key in closed_list:
                     continue
-                policy.on_expand(current_node, closed_list)
+                closed_list.add(current_node.state_key)
                 expansions += 1
                 pbar.update(1)
 
@@ -292,6 +209,9 @@ class SimPlanner:
                     child_heuristic = self._get_heuristic(obs_extra)
                     child_g_value = current_node.g_value + G_STEP_COST
 
+                    if child_key in closed_list:
+                        continue
+
                     child_node = SearchNode(
                         child_state,
                         current_node.action_history + [act_idx],
@@ -300,8 +220,6 @@ class SimPlanner:
                         child_key,
                         intersection=child_inter,
                     )
-                    if not policy.should_push_child(child_node, closed_list):
-                        continue
 
                     if self._is_better_inter_node(child_node, best_inter_node):
                         best_inter_node = child_node
