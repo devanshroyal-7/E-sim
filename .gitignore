@@ -18,6 +18,9 @@ last_plan.txt
 .antigravitycli/
 scorecard.png
 
+# Timestamped figures from planning / replot runs
+results/
+
 # Regenerated ACRONYM full-catalog cache (absolute local paths)
 # (paths cover both active and archived table-bussing layouts)
 data/acronym_dishware_manifest.json
