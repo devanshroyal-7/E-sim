@@ -339,6 +339,7 @@ source = { virtual = "." }
 dependencies = [
     { name = "h5py" },
     { name = "mani-skill" },
+    { name = "matplotlib" },
     { name = "pillow" },
     { name = "tqdm" },
     { name = "trimesh" },
@@ -353,6 +354,7 @@ dev = [
 requires-dist = [
     { name = "h5py", specifier = ">=3.10" },
     { name = "mani-skill", specifier = ">=3.0.1" },
+    { name = "matplotlib", specifier = ">=3.8" },
     { name = "pillow", specifier = ">=10.0" },
     { name = "tqdm", specifier = ">=4.68.3" },
     { name = "trimesh", specifier = ">=4.0" },

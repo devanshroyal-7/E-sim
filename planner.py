@@ -1,5 +1,6 @@
 import heapq
 import time
+from dataclasses import dataclass
 
 import numpy as np
 from tqdm import tqdm
@@ -19,8 +20,17 @@ TEE_LANDMARKS_XY = np.array(
     dtype=np.float64,
 )
 
-G_STEP_COST = 0.03
+G_STEP_COST = 0.1
 H_WEIGHT = 1.0
+
+
+@dataclass
+class PlanResult:
+    actions: list
+    expansion_xy: np.ndarray  # (N, 2) tee COM of each expanded node
+    start_pose: np.ndarray
+    goal_pose: np.ndarray
+    trajectory_xy: np.ndarray  # (M, 2) tee COM along chosen plan, incl. start
 
 
 class SearchNode:
@@ -69,6 +79,15 @@ class SimPlanner:
         primitives[:, :2] = xy
         return primitives
 
+    def _get_action_cost(self, parent_obs_extra, child_obs_extra):
+        parent_obj = self._to_numpy(parent_obs_extra["obj_pose"])
+        child_obj = self._to_numpy(child_obs_extra["obj_pose"])
+
+        parent_landmarks = self._landmarks_world_xy(parent_obj)     # 8x2
+        child_landmarks = self._landmarks_world_xy(child_obj)
+
+        return float(np.max(np.linalg.norm(parent_landmarks - child_landmarks, axis=-1)))
+
     def _to_numpy(self, x):
         if hasattr(x, "detach"):
             return x.detach().cpu().numpy()
@@ -85,7 +104,8 @@ class SimPlanner:
         rot = np.array([[c, -s], [s, c]], dtype=np.float64)
         return TEE_LANDMARKS_XY @ rot.T + xy
 
-    def _state_key(self, obs_extra, decimals=3):
+    def _state_key(self, obs_extra, decimals=2):
+        # decimals=2 -> states within 1 cm are the same state
         tcp = self._to_numpy(obs_extra["tcp_pose"])[0]
         obj = self._to_numpy(obs_extra["obj_pose"])[0]
         vals = np.array(
@@ -100,13 +120,12 @@ class SimPlanner:
 
     def _get_heuristic(self, obs_extra):
         obj = self._to_numpy(obs_extra["obj_pose"])
-        tcp = self._to_numpy(obs_extra["tcp_pose"])
-        tcp_to_obj = float(np.linalg.norm(tcp[:, :2] - obj[:, :2]))
+        # tcp = self._to_numpy(obs_extra["tcp_pose"])
         
         current = self._landmarks_world_xy(obj)
         
-        pose_err = float(np.mean(np.linalg.norm(current - self.goal_landmarks, axis=-1)))
-        return pose_err + 0.25 * tcp_to_obj
+        pose_err = float(np.max(np.linalg.norm(current - self.goal_landmarks, axis=-1)))
+        return pose_err 
 
     def _clone_state(self, state):
         if hasattr(state, "clone"):
@@ -137,6 +156,35 @@ class SimPlanner:
             return best_inter_node
         return best_h_node
 
+    def _obj_xy_from_obs(self, obs_extra):
+        obj = self._to_numpy(obs_extra["obj_pose"]).reshape(-1)
+        return np.array([obj[0], obj[1]], dtype=np.float64)
+
+    def _obj_pose_from_obs(self, obs_extra):
+        return self._to_numpy(obs_extra["obj_pose"]).reshape(-1).astype(np.float64)
+
+    def _replay_trajectory_xy(self, root_state, actions):
+        """Tee COM after each primitive, including start. No rendering."""
+        self.env.unwrapped.set_state(root_state)
+        pts = [self._obj_xy_from_obs(self.env.unwrapped.get_obs()["extra"])]
+        for act_idx in actions:
+            action = self.action_primitives[act_idx]
+            for _ in range(self.K):
+                self.env.step(action)
+            pts.append(self._obj_xy_from_obs(self.env.unwrapped.get_obs()["extra"]))
+        return np.asarray(pts, dtype=np.float64)
+
+    def _make_plan_result(self, root_state, start_pose, actions, expansion_xy):
+        trajectory_xy = self._replay_trajectory_xy(root_state, actions)
+        self.env.unwrapped.set_state(root_state)
+        return PlanResult(
+            actions=list(actions),
+            expansion_xy=np.asarray(expansion_xy, dtype=np.float64).reshape(-1, 2),
+            start_pose=np.asarray(start_pose, dtype=np.float64).reshape(-1),
+            goal_pose=np.asarray(self.goal_pose, dtype=np.float64).reshape(-1),
+            trajectory_xy=trajectory_xy,
+        )
+
     def plan(self, max_expansions=200, threshold_value=None):
         if threshold_value is None:
             threshold_value = float(self.env.unwrapped.intersection_thresh)
@@ -146,6 +194,7 @@ class SimPlanner:
         obs = self.env.unwrapped.get_obs()
         obs_extra = obs["extra"]
 
+        start_pose = self._obj_pose_from_obs(obs_extra)
         root_key = self._state_key(obs_extra)
         root_inter = self._intersection()
         root_heuristic = self._get_heuristic(obs_extra)
@@ -160,6 +209,7 @@ class SimPlanner:
         best_inter_node = root_node
         best_h_node = root_node
         expansions = 0
+        expansion_xy = []
 
         with tqdm(total=max_expansions, desc="Planning", unit="exp") as pbar:
             while expansions < max_expansions:
@@ -173,6 +223,11 @@ class SimPlanner:
                 closed_list.add(current_node.state_key)
                 expansions += 1
                 pbar.update(1)
+
+                self.env.unwrapped.set_state(current_node.sim_state)
+                current_obs = self.env.unwrapped.get_obs()
+                current_obs_extra = current_obs["extra"]
+                expansion_xy.append(self._obj_xy_from_obs(current_obs_extra))
 
                 if self._is_better_inter_node(current_node, best_inter_node):
                     best_inter_node = current_node
@@ -192,8 +247,12 @@ class SimPlanner:
                         f"Goal reached in {expansions} expansions "
                         f"(intersection={current_node.intersection:.4f})"
                     )
-                    self.env.unwrapped.set_state(root_state)
-                    return current_node.action_history
+                    return self._make_plan_result(
+                        root_state,
+                        start_pose,
+                        current_node.action_history,
+                        expansion_xy,
+                    )
 
                 for act_idx, action in enumerate(self.action_primitives):
                     self.env.unwrapped.set_state(current_node.sim_state)
@@ -202,12 +261,13 @@ class SimPlanner:
                         self.env.step(action)
 
                     child_state = self._clone_state(self.env.unwrapped.get_state())
-                    obs = self.env.unwrapped.get_obs()
-                    obs_extra = obs["extra"]
-                    child_key = self._state_key(obs_extra)
+                    child_obs = self.env.unwrapped.get_obs()
+                    child_obs_extra = child_obs["extra"]
+                    action_cost = self._get_action_cost(current_obs_extra, child_obs_extra)
+                    child_key = self._state_key(child_obs_extra)
                     child_inter = self._intersection()
-                    child_heuristic = self._get_heuristic(obs_extra)
-                    child_g_value = current_node.g_value + G_STEP_COST
+                    child_heuristic = self._get_heuristic(child_obs_extra)
+                    child_g_value = current_node.g_value + action_cost + self.step_size * G_STEP_COST
 
                     if child_key in closed_list:
                         continue
@@ -228,15 +288,19 @@ class SimPlanner:
 
                     heapq.heappush(open_list, child_node)
 
-        result = self._fallback_plan_node(root_node, best_inter_node, best_h_node)
+        result_node = self._fallback_plan_node(root_node, best_inter_node, best_h_node)
         tqdm.write(
             "Max expansions reached. Returning trajectory for the closest node "
             f"(best_intersection={best_inter_node.intersection:.4f}, "
             f"best_h={best_h_node.h_value:.4f}, "
-            f"returned_depth={len(result.action_history)})"
+            f"returned_depth={len(result_node.action_history)})"
         )
-        self.env.unwrapped.set_state(root_state)
-        return result.action_history
+        return self._make_plan_result(
+            root_state,
+            start_pose,
+            result_node.action_history,
+            expansion_xy,
+        )
 
     def execute_plan(
         self,
