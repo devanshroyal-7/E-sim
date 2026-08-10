@@ -14,7 +14,7 @@ H_WEIGHT = 1.0
 # State-key resolution: object xy to 1 cm, tee yaw to 5 deg bins.
 STATE_KEY_XY_DECIMALS = 2
 STATE_KEY_YAW_RES = np.deg2rad(5.0)
-
+TEE_CIRCUMRADIUS = 0.13975      # largest dist from T's COM to the corners
 
 class SearchNode:
     def __init__(
@@ -79,13 +79,18 @@ class SimPlanner:
 
     def _get_heuristic(self, obs_extra):
         obj = to_numpy(obs_extra["obj_pose"])
-        tcp = to_numpy(obs_extra["tcp_pose"])
+        # tcp = to_numpy(obs_extra["tcp_pose"])
 
         current = landmarks_world_xy(obj)
 
-        pose_err = float(np.max(np.linalg.norm(current - self.goal_landmarks, axis=-1)))
+        pose_feats = self._pose_features(obs_extra)
 
-        return pose_err
+        obj_xy = pose_feats["obj_xy"]
+        tcp_xy = pose_feats["tcp_xy"]
+
+        pose_err = float(np.max(np.linalg.norm(current - self.goal_landmarks, axis=-1)))
+        reach = max(0, float(np.linalg.norm(obj_xy - tcp_xy) - TEE_CIRCUMRADIUS))
+        return pose_err + reach
 
     def _pose_features(self, obs_extra):
         """Object / TCP quantities shared by the state key and the search log."""
