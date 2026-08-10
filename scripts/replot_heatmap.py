@@ -9,24 +9,12 @@ import argparse
 import sys
 from pathlib import Path
 
-import numpy as np
-
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from planner import PlanResult
+from plan_io import load_plan_result
+from search_log import format_report
 from viz_search import plot_expansion_heatmap, results_path
 
 DEFAULT_NPZ_PATH = Path(__file__).resolve().parents[1] / "last_plan_result.npz"
-
-
-def _load_result(path: Path) -> PlanResult:
-    data = np.load(path)
-    return PlanResult(
-        actions=[int(a) for a in data["actions"]],
-        expansion_xy=data["expansion_xy"],
-        start_pose=data["start_pose"],
-        goal_pose=data["goal_pose"],
-        trajectory_xy=data["trajectory_xy"],
-    )
 
 
 def main():
@@ -44,9 +32,20 @@ def main():
         help="Heatmap cell size in metres (default: 0.003)",
     )
     parser.add_argument(
+        "--rel-cell-size",
+        type=float,
+        default=0.005,
+        help="Cell size for the TCP-in-object-frame panel (default: 0.005)",
+    )
+    parser.add_argument(
         "--no-annotate",
         action="store_true",
         help="Omit the per-cell expansion counts",
+    )
+    parser.add_argument(
+        "--report",
+        action="store_true",
+        help="Print the search diagnostics report from the cached log",
     )
     parser.add_argument(
         "--out",
@@ -59,7 +58,7 @@ def main():
     if not args.npz.exists():
         parser.error(f"{args.npz} not found; run main.py first to produce it")
 
-    result = _load_result(args.npz)
+    result = load_plan_result(args.npz)
     out_path = args.out if args.out is not None else results_path(
         "expansion_heatmap_replot"
     )
@@ -68,7 +67,10 @@ def main():
         out_path,
         cell_size=args.cell_size,
         annotate=not args.no_annotate,
+        rel_cell_size=args.rel_cell_size,
     )
+    if args.report:
+        print(format_report(result.log, actions=result.actions))
     print(
         f"Replotted {len(result.expansion_xy)} expansions from {args.npz.name} "
         f"at cell_size={args.cell_size}"
