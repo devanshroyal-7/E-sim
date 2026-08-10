@@ -5,7 +5,7 @@ from pathlib import Path
 import matplotlib as mpl
 import matplotlib.pyplot as plt
 import numpy as np
-from matplotlib.colors import LogNorm, Normalize
+from matplotlib.colors import LinearSegmentedColormap, LogNorm, Normalize
 from matplotlib.patches import FancyArrowPatch, Polygon, Rectangle
 from matplotlib.patheffects import withStroke
 
@@ -13,6 +13,12 @@ from geometry import TEE_LANDMARKS_XY, landmarks_world_xy, yaw_from_quat
 from plan_io import PlanResult
 
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
+
+# magma_r's low end is near-white; skip it so 1-expansion cells stay visible.
+_HEAT_CMAP = LinearSegmentedColormap.from_list(
+    "magma_r_vis", mpl.colormaps["magma_r"](np.linspace(0.40, 1.0, 256))
+)
+_HEAT_CMAP.set_bad("#eeeeee")
 
 
 def results_path(stem, ext=".png", when=None):
@@ -266,8 +272,7 @@ def plot_expansion_heatmap(
         H = np.zeros((len(xedges) - 1, len(yedges) - 1), dtype=np.float64)
 
     norm, vmax = _count_norm(H)
-    cmap = mpl.colormaps["magma_r"].copy()
-    cmap.set_bad("#eeeeee")
+    cmap = _HEAT_CMAP
 
     fig, axes = plt.subplots(2, 2, figsize=(14, 13.5), constrained_layout=True)
     (ax_ctx, ax_hm), (ax_rel, ax_order) = axes
