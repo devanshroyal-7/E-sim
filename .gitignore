@@ -11,6 +11,7 @@ wheels/
 
 # Latest planner output (rewritten by main.py)
 last_plan.txt
+last_rrt_plan.txt
 
 # desloppify / editor local state
 .desloppify/
@@ -20,7 +21,11 @@ scorecard.png
 
 # Timestamped figures from planning / replot runs
 results/
+result/
 *.npz
+coverage_vs_time.png
+
+.claude/
 
 # Regenerated ACRONYM full-catalog cache (absolute local paths)
 # (paths cover both active and archived table-bussing layouts)
