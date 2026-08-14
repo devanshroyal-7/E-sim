@@ -18,7 +18,7 @@ class PlanResult:
 
 def save_plan_result(result: PlanResult, path):
     arrays = {
-        "actions": np.asarray(result.actions, dtype=np.int32),
+        "actions": np.asarray(result.actions),
         "expansion_xy": np.asarray(result.expansion_xy, dtype=np.float64),
         "start_pose": np.asarray(result.start_pose, dtype=np.float64),
         "goal_pose": np.asarray(result.goal_pose, dtype=np.float64),
@@ -32,7 +32,7 @@ def save_plan_result(result: PlanResult, path):
 def load_plan_result(path) -> PlanResult:
     data = np.load(path)
     return PlanResult(
-        actions=[int(a) for a in data["actions"]],
+        actions=list(data["actions"]),
         expansion_xy=data["expansion_xy"],
         start_pose=data["start_pose"],
         goal_pose=data["goal_pose"],
