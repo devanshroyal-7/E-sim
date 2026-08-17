@@ -9,7 +9,13 @@ features, so the planner never computes a quantity it does not use.
 
 `NullRecorder` implements the same hooks as no-ops, so a search can run with no
 bar, no tables, and no allocation.
+
+The recorder also owns the run's lifecycle in the other direction: it traps
+SIGINT and raises `stop_requested` instead of unwinding, so Ctrl-C ends the
+search at an expansion boundary rather than halfway through generating a node's
+successors, where the open list and the best-g table disagree.
 """
+import signal
 import time
 from contextlib import contextmanager
 
@@ -47,33 +53,97 @@ class SearchRecorder:
         self.root = None
         self.primitives_xy = np.zeros((0, 2))
         self.pops_skipped_closed = 0
-        self.pushes = 0
-        self.peak_open = 0
+        # The root is already on the open list by the time the loop starts.
+        self.pushes = 1
+        self.peak_open = 1
+        self.stop_requested = False
         self._t0 = time.perf_counter()
+        self._elapsed_offset = 0.0
+        self._resumed = False
         self._bar = None
         # Set by `expanded`, so `generated` can describe an edge with child-side
         # values only.
         self._parent_node = None
         self._parent_features = None
 
+    def resume_from(self, checkpoint):
+        """Reopen a checkpoint's tables and counters so this run appends to
+        them: expansion indices stay valid and the report covers both runs."""
+        state = checkpoint.recorder
+        self.expansion_log = ColumnLog.from_arrays(
+            EXPANSION_COLUMNS, state["expansions"]
+        )
+        self.edge_log = ColumnLog.from_arrays(EDGE_COLUMNS, state["edges"])
+        counters = state["counters"]
+        self.pushes = int(counters["pushes"])
+        self.peak_open = int(counters["peak_open"])
+        self.pops_skipped_closed = int(counters["pops_skipped_closed"])
+        self._elapsed_offset = float(counters["elapsed_s"])
+        self._resumed = True
+
+    def checkpoint_state(self):
+        """The half of a checkpoint the recorder owns."""
+        return {
+            "expansions": self.expansion_log.arrays(),
+            "edges": self.edge_log.arrays(),
+            "counters": {
+                "pushes": self.pushes,
+                "peak_open": self.peak_open,
+                "pops_skipped_closed": self.pops_skipped_closed,
+                "elapsed_s": self._elapsed(),
+            },
+        }
+
+    def _elapsed(self):
+        return self._elapsed_offset + time.perf_counter() - self._t0
+
     @contextmanager
     def run(self, max_expansions, params, root, primitives_xy):
-        """Own the progress bar for the duration of the search loop."""
-        self._reset()
+        """Own the progress bar and the interrupt for the search loop."""
+        if self._resumed:
+            self._resumed = False
+        else:
+            self._reset()
         self.max_expansions = max_expansions
         self.params = dict(params)
         self.root = root
         self.primitives_xy = primitives_xy
-        # The root is already on the open list by the time the loop starts.
-        self.pushes = 1
-        self.peak_open = 1
+        self.stop_requested = False
         self._t0 = time.perf_counter()
-        with tqdm(total=max_expansions, desc="Planning", unit="exp") as bar:
+        with tqdm(
+            total=max_expansions,
+            initial=len(self.expansion_log),
+            desc="Planning",
+            unit="exp",
+        ) as bar:
             self._bar = bar
             try:
-                yield self
+                with self._stop_on_sigint():
+                    yield self
             finally:
                 self._bar = None
+
+    @contextmanager
+    def _stop_on_sigint(self):
+        def handler(signum, frame):
+            self.stop_requested = True
+            # Hand SIGINT back, so a second Ctrl-C aborts immediately.
+            signal.signal(signal.SIGINT, previous)
+            tqdm.write(
+                "interrupt received, stopping after this expansion "
+                "(Ctrl-C again to abort now)"
+            )
+
+        try:
+            previous = signal.signal(signal.SIGINT, handler)
+        except ValueError:
+            # Not the main thread, so leave interrupt handling alone.
+            yield
+            return
+        try:
+            yield
+        finally:
+            signal.signal(signal.SIGINT, previous)
 
     def pop_closed(self):
         self.pops_skipped_closed += 1
@@ -107,7 +177,7 @@ class SearchRecorder:
             open_size=open_size,
             closed_size=closed_size,
             pushes=self.pushes,
-            elapsed=time.perf_counter() - self._t0,
+            elapsed=self._elapsed(),
         )
 
         if self._bar is not None:
@@ -210,7 +280,7 @@ class SearchRecorder:
                 "pushes": self.pushes,
                 "peak_open": self.peak_open,
                 "distinct_keys": distinct_keys,
-                "wall_time_s": time.perf_counter() - self._t0,
+                "wall_time_s": self._elapsed(),
                 "goal_reached": int(goal_reached),
                 "returned_depth": len(result_node.action_history),
                 "root_h": self.root.h_value,
@@ -224,9 +294,26 @@ class SearchRecorder:
 class NullRecorder:
     """Same hooks as `SearchRecorder`, recording nothing."""
 
+    stop_requested = False
+
     @contextmanager
     def run(self, max_expansions, params, root, primitives_xy):
         yield self
+
+    def resume_from(self, checkpoint):
+        pass
+
+    def checkpoint_state(self):
+        return {
+            "expansions": {},
+            "edges": {},
+            "counters": {
+                "pushes": 0,
+                "peak_open": 0,
+                "pops_skipped_closed": 0,
+                "elapsed_s": 0.0,
+            },
+        }
 
     def pop_closed(self):
         pass

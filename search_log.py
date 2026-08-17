@@ -72,6 +72,20 @@ class ColumnLog:
     def __init__(self, names):
         self.columns = {name: [] for name in names}
 
+    @classmethod
+    def from_arrays(cls, names, columns):
+        """Reopen a materialised log for appending, as a resumed search does."""
+        log = cls(names)
+        if not columns:
+            return log
+        if set(columns) != set(log.columns):
+            missing = sorted(set(log.columns) - set(columns))
+            unknown = sorted(set(columns) - set(log.columns))
+            raise KeyError(f"column mismatch (missing={missing}, unknown={unknown})")
+        for name in log.columns:
+            log.columns[name] = list(columns[name])
+        return log
+
     def add(self, **values):
         if values.keys() != self.columns.keys():
             missing = sorted(set(self.columns) - set(values))

@@ -6,6 +6,7 @@ from tqdm import tqdm
 
 from geometry import landmarks_world_xy, to_numpy, wrap_pi, yaw_from_quat
 from plan_io import PlanResult
+from search_checkpoint import NullCheckpointer
 from search_recorder import SearchRecorder
 
 G_STEP_COST = 0.1
@@ -150,14 +151,6 @@ class SimPlanner:
             return False
         return candidate.g_value < incumbent.g_value
 
-    def _fallback_plan_node(
-        self, root_node: SearchNode, best_inter_node: SearchNode, best_h_node: SearchNode
-    ) -> SearchNode:
-        """Prefer any intersection progress; otherwise return best landmark h."""
-        if best_inter_node.intersection > root_node.intersection:
-            return best_inter_node
-        return best_h_node
-
     def _obj_xy_from_obs(self, obs_extra):
         obj = to_numpy(obs_extra["obj_pose"]).reshape(-1)
         return np.array([obj[0], obj[1]], dtype=np.float64)
@@ -166,7 +159,8 @@ class SimPlanner:
         return to_numpy(obs_extra["obj_pose"]).reshape(-1).astype(np.float64)
 
     def _search_params(self, threshold_value):
-        """Search settings the recorder stores alongside the log."""
+        """Search settings the recorder stores alongside the log, and that a
+        resumed search has to match."""
         return {
             "threshold": threshold_value,
             "step_size": self.step_size,
@@ -174,6 +168,8 @@ class SimPlanner:
             "g_step_cost": G_STEP_COST,
             "h_weight": H_WEIGHT,
             "yaw_res_deg": float(np.rad2deg(STATE_KEY_YAW_RES)),
+            "xy_decimals": STATE_KEY_XY_DECIMALS,
+            "tee_circumradius": TEE_CIRCUMRADIUS,
         }
 
     def _replay_trajectory_xy(self, root_state, actions):
@@ -199,11 +195,22 @@ class SimPlanner:
             log=log,
         )
 
-    def plan(self, max_expansions=200, threshold_value=None, recorder=None):
+    def plan(
+        self,
+        max_expansions=200,
+        threshold_value=None,
+        recorder=None,
+        resume=None,
+        checkpointer=None,
+    ):
+        """Expand until `max_expansions` *total*, counting the expansions a
+        resumed checkpoint already made towards the budget."""
         if threshold_value is None:
             threshold_value = float(self.env.unwrapped.intersection_thresh)
         if recorder is None:
             recorder = SearchRecorder()
+        if checkpointer is None:
+            checkpointer = NullCheckpointer()
 
         root_state = self._clone_state(self.env.unwrapped.get_state())
 
@@ -232,13 +239,26 @@ class SimPlanner:
         expansions = 0
         goal_node = None
 
+        if resume is not None:
+            (open_list, closed_list, best_g_by_key, best_h_node,
+             best_inter_node, expansions) = resume.restore(SearchNode, like=root_state)
+            recorder.resume_from(resume)
+
         with recorder.run(
             max_expansions,
             self._search_params(threshold_value),
             root_node,
             self.action_primitives[:, :2],
         ) as rec:
-            while expansions < max_expansions:
+            while expansions < max_expansions and not rec.stop_requested:
+                # Top of the loop is the only point where the open list, the
+                # closed set and the expansion log agree, so it is the only
+                # safe place to snapshot.
+                checkpointer.tick(
+                    expansions, open_list, closed_list, best_g_by_key,
+                    best_h_node, best_inter_node,
+                )
+
                 if not open_list:
                     # No more nodes to expand
                     rec.open_exhausted()
@@ -334,10 +354,13 @@ class SimPlanner:
         if goal_node is not None:
             result_node = goal_node
         else:
-            result_node = self._fallback_plan_node(
-                root_node, best_inter_node, best_h_node
-            )
+            result_node = best_h_node
             recorder.exhausted(result_node, best_inter_node, best_h_node)
+
+        checkpointer.save(
+            expansions, open_list, closed_list, best_g_by_key,
+            best_h_node, best_inter_node, goal_reached=goal_node is not None,
+        )
 
         log = recorder.finish(
             result_node,
