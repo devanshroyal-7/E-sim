@@ -340,6 +340,7 @@ class RRTPlanner:
         threshold_value=None,
         plot_path=COVERAGE_PLOT_PATH,
         recorder=None,
+        extra_params=None,
     ):
         if threshold_value is None:
             threshold_value = float(self.env.unwrapped.intersection_thresh)
@@ -389,6 +390,8 @@ class RRTPlanner:
             "n_candidates": self.n_candidates,
             "goal_bias": self.goal_bias,
         }
+        if extra_params:
+            params.update(extra_params)
 
         result_node = None
         goal_reached = False
@@ -499,16 +502,37 @@ if __name__ == "__main__":
         default="videos",
         help="Directory to save the replay video to when --save-video is set (default: videos)",
     )
+    parser.add_argument(
+        "--env-seed",
+        type=int,
+        default=0,
+        help="Env reset seed -- controls the T/goal/robot starting layout (default: 0)",
+    )
+    parser.add_argument(
+        "--rng-seed",
+        type=int,
+        default=None,
+        help="numpy RNG seed for RRT's target/candidate sampling (default: random, "
+        "but it's always printed and saved so a good run can be reproduced later "
+        "with --rng-seed <value>)",
+    )
     args = parser.parse_args()
+
+    # Locked in below via np.random.seed() -- drawn from the ambient (unseeded)
+    # state first if the user didn't pin one, so every run still gets genuine
+    # randomness by default while still being reproducible after the fact.
+    rng_seed = args.rng_seed if args.rng_seed is not None else int(np.random.randint(0, 2**31 - 1))
+    np.random.seed(rng_seed)
+    print(f"env_seed={args.env_seed} rng_seed={rng_seed}")
 
     # rgb_array costs nothing extra during planning (render() is never called
     # mid-search) but lets us record the final replay in this exact instance.
     plan_render_mode = "rgb_array" if args.save_video else None
     plan_env = gym.make("PushT-v1", **ENV_KWARGS, render_mode=plan_render_mode)
-    plan_env.reset(seed=0)
+    plan_env.reset(seed=args.env_seed)
 
     verify_set_state_determinism(plan_env)
-    plan_env.reset(seed=0)  # discard the warmup/check rollout, start planning clean
+    plan_env.reset(seed=args.env_seed)  # discard the warmup/check rollout, start planning clean
 
     initial_state = plan_env.unwrapped.get_state().clone()
 
@@ -520,7 +544,11 @@ if __name__ == "__main__":
         n_candidates=args.n_candidates,
         allow_render=args.save_video,
     )
-    result = planner.plan(max_iters=args.max_iters, threshold_value=args.threshold)
+    result = planner.plan(
+        max_iters=args.max_iters,
+        threshold_value=args.threshold,
+        extra_params={"env_seed": args.env_seed, "rng_seed": rng_seed},
+    )
     plan = result.actions
     print(f"Plan length: {len(plan)}")
 
@@ -541,7 +569,7 @@ if __name__ == "__main__":
         plan_env = RecordEpisode(
             plan_env, output_dir=args.video_dir, save_trajectory=False, save_video=True
         )
-        plan_env.reset(seed=0)
+        plan_env.reset(seed=args.env_seed)
         plan_env.unwrapped.set_state(initial_state)
 
         replay_planner = RRTPlanner(
@@ -553,7 +581,7 @@ if __name__ == "__main__":
     else:
         plan_env.close()
         render_env = gym.make("PushT-v1", **ENV_KWARGS, render_mode="human")
-        render_env.reset(seed=0)
+        render_env.reset(seed=args.env_seed)
         render_planner = RRTPlanner(
             render_env, K_substeps=K_SUBSTEPS, step_size=STEP_SIZE, allow_render=True
         )
