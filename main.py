@@ -19,6 +19,7 @@ ENV_KWARGS = dict(
 )
 K_SUBSTEPS = 10
 STEP_SIZE = 0.2
+SEED = 0
 PLAN_PATH = Path(__file__).resolve().parent / "last_plan.txt"
 RESULT_NPZ_PATH = Path(__file__).resolve().parent / "last_plan_result.npz"
 CHECKPOINT_PATH = (
@@ -70,10 +71,16 @@ def main():
         action="store_true",
         help="Resume even if the search parameters or heuristic have changed",
     )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=SEED,
+        help=f"Env reset seed (default: {SEED})",
+    )
     args = parser.parse_args()
 
     plan_env = gym.make("PushT-v1", **ENV_KWARGS, render_mode=None)
-    plan_env.reset(seed=0)
+    plan_env.reset(seed=args.seed)
     initial_state = plan_env.unwrapped.get_state().clone()
 
     planner = SimPlanner(plan_env, K_substeps=K_SUBSTEPS, step_size=STEP_SIZE)
@@ -95,7 +102,7 @@ def main():
     )
     print(
         f"Planning with threshold={args.threshold}, "
-        f"max_expansions={args.max_expansions}"
+        f"max_expansions={args.max_expansions}, seed={args.seed}"
     )
     result = planner.plan(
         max_expansions=args.max_expansions,
@@ -117,6 +124,7 @@ def main():
     PLAN_PATH.write_text(
         f"# step_size={planner.step_size}\n"
         f"# k_substeps={planner.K}\n"
+        f"# seed={args.seed}\n"
         + ",".join(str(a) for a in plan)
         + "\n"
     )
@@ -133,12 +141,12 @@ def main():
     print(f"Replay with: uv run scripts/execute_plan.py")
     print(
         f"Search further with: uv run main.py --resume {args.checkpoint} "
-        f"--max-expansions {args.max_expansions * 2}"
+        f"--max-expansions {args.max_expansions * 2} --seed {args.seed}"
     )
     plan_env.close()
 
     render_env = gym.make("PushT-v1", **ENV_KWARGS, render_mode="human")
-    render_env.reset(seed=0)
+    render_env.reset(seed=args.seed)
     render_planner = SimPlanner(render_env, K_substeps=K_SUBSTEPS, step_size=STEP_SIZE)
     render_planner.execute_plan(initial_state, plan)
     render_env.close()
