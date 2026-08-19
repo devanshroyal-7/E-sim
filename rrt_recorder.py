@@ -3,7 +3,13 @@
 Mirrors search_recorder.SearchRecorder's hook pattern, but shaped for RRT's loop
 (sample target -> nearest neighbor -> expand -> insert) instead of A*'s open/closed
 list. NullRRTRecorder implements the same hooks as no-ops.
+
+The recorder also owns the run's lifecycle in the other direction: it traps
+SIGINT and raises `stop_requested` instead of unwinding, so Ctrl-C ends the
+search at an iteration boundary rather than mid-insert, where the tree and the
+expansion log would disagree.
 """
+import signal
 import time
 from contextlib import contextmanager
 
@@ -42,22 +48,76 @@ class RRTRecorder:
         self.params = {}
         self.max_iters = 0
         self.root = None
+        self.stop_requested = False
         self._t0 = time.perf_counter()
+        self._elapsed_offset = 0.0
+        self._resumed = False
         self._bar = None
+
+    def resume_from(self, checkpoint):
+        """Reopen a checkpoint's table so this run appends to it: row indices
+        stay valid and the report covers both runs."""
+        state = checkpoint.recorder
+        self.expansion_log = ColumnLog.from_arrays(EXPANSION_COLUMNS, state["expansions"])
+        self._elapsed_offset = float(state["counters"]["elapsed_s"])
+        self._resumed = True
+
+    def checkpoint_state(self):
+        """The half of a checkpoint the recorder owns."""
+        return {
+            "expansions": self.expansion_log.arrays(),
+            "counters": {"elapsed_s": self._elapsed()},
+        }
+
+    def _elapsed(self):
+        return self._elapsed_offset + time.perf_counter() - self._t0
 
     @contextmanager
     def run(self, max_iters, params, root):
-        self._reset()
+        """Own the progress bar and the interrupt for the search loop."""
+        if self._resumed:
+            self._resumed = False
+        else:
+            self._reset()
         self.max_iters = max_iters
         self.params = dict(params)
         self.root = root
+        self.stop_requested = False
         self._t0 = time.perf_counter()
-        with tqdm(total=max_iters, desc="RRT Planning", unit="iter") as bar:
+        with tqdm(
+            total=max_iters,
+            initial=max(len(self.expansion_log) - 1, 0),
+            desc="RRT Planning",
+            unit="iter",
+        ) as bar:
             self._bar = bar
             try:
-                yield self
+                with self._stop_on_sigint():
+                    yield self
             finally:
                 self._bar = None
+
+    @contextmanager
+    def _stop_on_sigint(self):
+        def handler(signum, frame):
+            self.stop_requested = True
+            # Hand SIGINT back, so a second Ctrl-C aborts immediately.
+            signal.signal(signal.SIGINT, previous)
+            tqdm.write(
+                "interrupt received, stopping after this iteration "
+                "(Ctrl-C again to abort now)"
+            )
+
+        try:
+            previous = signal.signal(signal.SIGINT, handler)
+        except ValueError:
+            # Not the main thread, so leave interrupt handling alone.
+            yield
+            return
+        try:
+            yield
+        finally:
+            signal.signal(signal.SIGINT, previous)
 
     def _add_row(self, node, parent_idx, best_h_node, best_inter_node, tree_size):
         obj_x, obj_y, obj_yaw = node.key
@@ -76,7 +136,7 @@ class RRTRecorder:
             best_h=best_h_node.h_value,
             best_intersection=best_inter_node.intersection,
             tree_size=tree_size,
-            elapsed=time.perf_counter() - self._t0,
+            elapsed=self._elapsed(),
         )
 
     def log_root(self, root_node):
@@ -109,6 +169,14 @@ class RRTRecorder:
             f"returned_depth={returned_depth})"
         )
 
+    def interrupted(self, best_inter_node, best_h_node, returned_depth):
+        tqdm.write(
+            "Interrupted. Returning trajectory for the closest node so far "
+            f"(best_intersection={best_inter_node.intersection:.4f}, "
+            f"best_h={best_h_node.h_value:.4f}, "
+            f"returned_depth={returned_depth})"
+        )
+
     def expansion_xy(self):
         """Tee COM of every logged node, in insertion order (root included)."""
         if not len(self.expansion_log):
@@ -125,7 +193,7 @@ class RRTRecorder:
             summary={
                 "iterations": tree_size - 1,
                 "max_iters": self.max_iters,
-                "wall_time_s": time.perf_counter() - self._t0,
+                "wall_time_s": self._elapsed(),
                 "goal_reached": int(goal_reached),
                 "root_h": self.root.h_value,
                 "root_intersection": self.root.intersection,
@@ -137,9 +205,17 @@ class RRTRecorder:
 class NullRRTRecorder:
     """Same hooks as `RRTRecorder`, recording nothing."""
 
+    stop_requested = False
+
     @contextmanager
     def run(self, max_iters, params, root):
         yield self
+
+    def resume_from(self, checkpoint):
+        pass
+
+    def checkpoint_state(self):
+        return {"expansions": {}, "counters": {"elapsed_s": 0.0}}
 
     def log_root(self, root_node):
         pass
@@ -151,6 +227,9 @@ class NullRRTRecorder:
         pass
 
     def exhausted(self, best_inter_node, best_h_node, returned_depth):
+        pass
+
+    def interrupted(self, best_inter_node, best_h_node, returned_depth):
         pass
 
     def expansion_xy(self):

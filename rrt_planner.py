@@ -6,12 +6,16 @@ from tqdm import tqdm
 
 from geometry import TEE_LANDMARKS_XY, to_numpy, yaw_from_quat
 from plan_io import PlanResult, save_plan_result
+from rrt_checkpoint import Checkpointer, NullCheckpointer, fingerprint, load_checkpoint
 from rrt_recorder import RRTRecorder
 from viz_search import plot_expansion_heatmap
 
 PLAN_PATH = Path(__file__).resolve().parent / "last_rrt_plan.txt"
 COVERAGE_PLOT_PATH = Path(__file__).resolve().parent / "coverage_vs_time.png"
 RESULT_NPZ_PATH = Path(__file__).resolve().parent / "last_rrt_plan_result.npz"
+CHECKPOINT_PATH = (
+    Path(__file__).resolve().parent / "results" / "checkpoints" / "last_rrt_search.npz"
+)
 
 
 def verify_set_state_determinism(env, n_warmup_steps=5, n_check_steps=10):
@@ -341,11 +345,17 @@ class RRTPlanner:
         plot_path=COVERAGE_PLOT_PATH,
         recorder=None,
         extra_params=None,
+        resume=None,
+        checkpointer=None,
     ):
+        """Expand until `max_iters` *total*, counting the nodes a resumed
+        checkpoint already made towards the budget."""
         if threshold_value is None:
             threshold_value = float(self.env.unwrapped.intersection_thresh)
         if recorder is None:
             recorder = RRTRecorder()
+        if checkpointer is None:
+            checkpointer = NullCheckpointer()
 
         root_state = self._clone_state(self.env.unwrapped.get_state())
         obs_extra = self.env.unwrapped.get_obs()["extra"]
@@ -370,15 +380,25 @@ class RRTPlanner:
                 log=None,
             )
 
-        keys_xy = np.zeros((max_iters + 1, 2), dtype=np.float64)
-        keys_theta = np.zeros((max_iters + 1,), dtype=np.float64)
-        nodes = [root_node]
-        keys_xy[0] = root_key[:2]
-        keys_theta[0] = root_key[2]
-        count = 1
-
-        best_inter_node = root_node
-        best_h_node = root_node
+        if resume is not None:
+            nodes, keys_xy, keys_theta, best_inter_node, best_h_node = resume.restore(
+                RRTNode, like=root_state
+            )
+            count = len(nodes)
+            if count < max_iters + 1:
+                pad = max_iters + 1 - count
+                keys_xy = np.concatenate([keys_xy, np.zeros((pad, 2))], axis=0)
+                keys_theta = np.concatenate([keys_theta, np.zeros((pad,))], axis=0)
+            recorder.resume_from(resume)
+        else:
+            keys_xy = np.zeros((max_iters + 1, 2), dtype=np.float64)
+            keys_theta = np.zeros((max_iters + 1,), dtype=np.float64)
+            nodes = [root_node]
+            keys_xy[0] = root_key[:2]
+            keys_theta[0] = root_key[2]
+            count = 1
+            best_inter_node = root_node
+            best_h_node = root_node
 
         start_time = time.time()
         coverage_history = [(0.0, root_node.intersection)]
@@ -396,9 +416,12 @@ class RRTPlanner:
         result_node = None
         goal_reached = False
         with recorder.run(max_iters, params, root_node) as rec:
-            rec.log_root(root_node)
+            if resume is None:
+                rec.log_root(root_node)
 
-            while count <= max_iters:
+            while count <= max_iters and not rec.stop_requested:
+                checkpointer.tick(nodes, best_inter_node, best_h_node)
+
                 target = self._sample_target()
                 target_landmarks = self._landmarks_world_xy(*target)
 
@@ -427,9 +450,14 @@ class RRTPlanner:
 
             if result_node is None:
                 result_node = self._pick_fallback(root_node, best_inter_node, best_h_node)
-                rec.exhausted(best_inter_node, best_h_node, len(self._extract_path(result_node)))
+                if rec.stop_requested:
+                    rec.interrupted(best_inter_node, best_h_node, len(self._extract_path(result_node)))
+                else:
+                    rec.exhausted(best_inter_node, best_h_node, len(self._extract_path(result_node)))
 
             log = rec.finish(result_node, goal_reached, count)
+
+        checkpointer.save(nodes, best_inter_node, best_h_node, goal_reached=goal_reached)
 
         self.env.unwrapped.set_state(root_state)
         self._save_coverage_plot(coverage_history, plot_path)
@@ -516,6 +544,35 @@ if __name__ == "__main__":
         "but it's always printed and saved so a good run can be reproduced later "
         "with --rng-seed <value>)",
     )
+    parser.add_argument(
+        "--resume",
+        nargs="?",
+        type=Path,
+        const=CHECKPOINT_PATH,
+        default=None,
+        metavar="PATH",
+        help="Continue a checkpointed search instead of starting from the root. "
+        "--max-iters is the total budget, so resuming a 5000-node checkpoint "
+        f"with 10000 runs 5000 more (default: {CHECKPOINT_PATH})",
+    )
+    parser.add_argument(
+        "--checkpoint",
+        type=Path,
+        default=CHECKPOINT_PATH,
+        help=f"Where to write the search checkpoint (default: {CHECKPOINT_PATH})",
+    )
+    parser.add_argument(
+        "--checkpoint-every",
+        type=int,
+        default=1000,
+        metavar="N",
+        help="Autosave every N tree nodes; 0 saves only at the end (default: 1000)",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Resume even if the search parameters or heuristic have changed",
+    )
     args = parser.parse_args()
 
     # Locked in below via np.random.seed() -- drawn from the ambient (unseeded)
@@ -544,10 +601,29 @@ if __name__ == "__main__":
         n_candidates=args.n_candidates,
         allow_render=args.save_video,
     )
+
+    threshold_value = (
+        args.threshold if args.threshold is not None else float(plan_env.unwrapped.intersection_thresh)
+    )
+    # Reads the env's current (post-reset) state as the search root, so this
+    # has to happen before planning starts.
+    search_id = fingerprint(planner, threshold_value)
+
+    resume = None
+    if args.resume:
+        resume = load_checkpoint(args.resume, search_id, force=args.force)
+        print(f"Resuming {args.resume} at {resume.count} nodes")
+
+    recorder = RRTRecorder()
+    checkpointer = Checkpointer(args.checkpoint, search_id, recorder, every=args.checkpoint_every)
+
     result = planner.plan(
         max_iters=args.max_iters,
-        threshold_value=args.threshold,
+        threshold_value=threshold_value,
         extra_params={"env_seed": args.env_seed, "rng_seed": rng_seed},
+        recorder=recorder,
+        resume=resume,
+        checkpointer=checkpointer,
     )
     plan = result.actions
     print(f"Plan length: {len(plan)}")
@@ -560,6 +636,10 @@ if __name__ == "__main__":
 
     heatmap_path = plot_expansion_heatmap(result)
     print(f"Saved expansion heatmap to {heatmap_path}")
+    print(
+        f"Search further with: uv run rrt_planner.py --resume {args.checkpoint} "
+        f"--max-iters {args.max_iters * 2} --env-seed {args.env_seed} --rng-seed {rng_seed}"
+    )
 
     if args.save_video:
         from mani_skill.utils.wrappers.record import RecordEpisode
