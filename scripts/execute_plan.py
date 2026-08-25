@@ -29,7 +29,7 @@ SEED = 0
 DEFAULT_PLAN_PATH = Path(__file__).resolve().parents[1] / "last_plan.txt"
 
 _META_RE = re.compile(
-    r"^\s*#\s*(step_size|k_substeps)\s*=\s*([-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)\s*$"
+    r"^\s*#\s*(step_size|k_substeps|seed)\s*=\s*([-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)\s*$"
 )
 
 
@@ -44,7 +44,7 @@ def _parse_plan_text(text: str) -> list[int]:
 
 
 def _parse_plan_file(path: Path) -> tuple[list[int], dict]:
-    """Load action indices plus optional `# step_size=` / `# k_substeps=` headers."""
+    """Load action indices plus optional `# step_size=` / `# k_substeps=` / `# seed=` headers."""
     meta: dict = {}
     action_lines: list[str] = []
     for line in path.read_text().splitlines():
@@ -116,8 +116,11 @@ def main():
     parser.add_argument(
         "--seed",
         type=int,
-        default=SEED,
-        help=f"Env reset seed (default: {SEED})",
+        default=None,
+        help=(
+            "Env reset seed (default: value saved with the plan, "
+            f"else {SEED})"
+        ),
     )
     parser.add_argument(
         "--step-size",
@@ -150,15 +153,16 @@ def main():
         if args.k_substeps is not None
         else int(meta.get("k_substeps", K_SUBSTEPS))
     )
+    seed = args.seed if args.seed is not None else int(meta.get("seed", SEED))
 
     env = gym.make("PushT-v1", **ENV_KWARGS, render_mode="human")
-    env.reset(seed=args.seed)
+    env.reset(seed=seed)
     initial_state = env.unwrapped.get_state().clone()
 
     planner = SimPlanner(env, K_substeps=k_substeps, step_size=step_size)
     print(
         f"Executing plan of length {len(plan)}: {plan}\n"
-        f"  seed={args.seed} step_size={step_size} "
+        f"  seed={seed} step_size={step_size} "
         f"K={k_substeps} delay={args.delay}s"
     )
     planner.execute_plan(

@@ -96,7 +96,7 @@ def run_astar(args):
     )
     print(
         f"Saved plan to {PLAN_PATH} "
-        f"(step_size={planner.step_size}, k_substeps={planner.K})"
+        f"(step_size={planner.step_size}, k_substeps={planner.K}, seed={args.seed})"
     )
 
     save_plan_result(result, RESULT_NPZ_PATH)
