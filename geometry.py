@@ -17,6 +17,11 @@ TEE_LANDMARKS_XY = np.array(
 )
 
 
+# Farthest a T corner ever gets from the T's COM -- a cheap "is the TCP still
+# near the block" radius.
+TEE_CIRCUMRADIUS = float(np.linalg.norm(TEE_LANDMARKS_XY, axis=-1).max())
+
+
 def to_numpy(x):
     if hasattr(x, "detach"):
         return x.detach().cpu().numpy()

@@ -4,18 +4,17 @@ from pathlib import Path
 import numpy as np
 from tqdm import tqdm
 
-from geometry import TEE_LANDMARKS_XY, to_numpy, yaw_from_quat
-from plan_io import PlanResult, save_plan_result
-from rrt_checkpoint import Checkpointer, NullCheckpointer, fingerprint, load_checkpoint
+from geometry import TEE_CIRCUMRADIUS, TEE_LANDMARKS_XY, to_numpy, yaw_from_quat
+from plan_io import PlanResult
+from rrt_checkpoint import NullCheckpointer
 from rrt_recorder import RRTRecorder
-from viz_search import plot_expansion_heatmap
 
-PLAN_PATH = Path(__file__).resolve().parent / "last_rrt_plan.txt"
-COVERAGE_PLOT_PATH = Path(__file__).resolve().parent / "coverage_vs_time.png"
-RESULT_NPZ_PATH = Path(__file__).resolve().parent / "last_rrt_plan_result.npz"
-CHECKPOINT_PATH = (
-    Path(__file__).resolve().parent / "results" / "checkpoints" / "last_rrt_search.npz"
-)
+_DEFAULT_COVERAGE_PLOT_PATH = Path(__file__).resolve().parent / "coverage_vs_time.png"
+
+# Within this band, two candidates count as making the same object progress
+# (typically: neither touched the T), so the winner is picked by whichever
+# leaves the TCP closer to the object instead.
+CANDIDATE_TIE_EPS = 1e-3
 
 
 def verify_set_state_determinism(env, n_warmup_steps=5, n_check_steps=10):
@@ -78,8 +77,6 @@ class RRTNode:
         parent,
         action_from_parent,
         key,
-        g_value,
-        h_value,
         intersection,
         tcp_xy,
         rel_xy,
@@ -88,8 +85,6 @@ class RRTNode:
         self.parent = parent
         self.action_from_parent = action_from_parent
         self.key = key  # (obj_x, obj_y, obj_yaw)
-        self.g_value = g_value
-        self.h_value = h_value
         self.intersection = intersection
         self.tcp_xy = tcp_xy
         self.rel_xy = rel_xy  # tcp position in the T's body frame
@@ -104,7 +99,8 @@ class RRTPlanner:
         goal_bias=0.1,
         n_candidates=8,
         angle_jitter_scale=0.5,
-        mag_range=(0.3, 1.0),
+        mag_range=(0.15, 0.5),
+        tcp_engage_radius=TEE_CIRCUMRADIUS,
         workspace_xy_bounds=None,
         workspace_margin=0.3,
         allow_render=False,
@@ -122,6 +118,9 @@ class RRTPlanner:
         self.n_candidates = n_candidates
         self.angle_jitter_scale = angle_jitter_scale
         self.mag_range = mag_range
+        # Beyond this distance from the T, the TCP is not "still pushing" --
+        # aim candidates back at the T instead of blindly toward the target.
+        self.tcp_engage_radius = tcp_engage_radius
         self.action_dim = env.action_space.shape[-1]
 
         if workspace_xy_bounds is None:
@@ -156,13 +155,6 @@ class RRTPlanner:
         rot = self._rot2d(theta)
         return TEE_LANDMARKS_XY @ rot.T + np.array([x, y], dtype=np.float64)
 
-    def _landmark_dist(self, a_xytheta, b_xytheta):
-        la = self._landmarks_world_xy(*a_xytheta)
-        lb = self._landmarks_world_xy(*b_xytheta)
-        # Max over the 8 landmarks (worst-corner error), not mean: a rigid
-        # body match needs every corner close, not just the average corner.
-        return float(np.linalg.norm(la - lb, axis=-1).max())
-
     def _obj_xytheta(self, obs_extra):
         obj = to_numpy(obs_extra["obj_pose"])[0]
         return (float(obj[0]), float(obj[1]), float(yaw_from_quat(obj[3:7])))
@@ -176,22 +168,14 @@ class RRTPlanner:
         inter = self.env.unwrapped.pseudo_render_intersection()
         return float(to_numpy(inter).reshape(-1)[0])
 
-    def _heuristic(self, obs_extra):
-        """Landmark distance to goal + tcp-to-object distance. Fallback scoring only."""
-        obj_xytheta = self._obj_xytheta(obs_extra)
-        goal_xytheta = self._goal_xytheta()
-        tcp = to_numpy(obs_extra["tcp_pose"])[0]
-        tcp_to_obj = float(np.linalg.norm(tcp[:2] - np.array(obj_xytheta[:2])))
-        pose_err = self._landmark_dist(obj_xytheta, goal_xytheta)
-        return pose_err + 0.25 * tcp_to_obj
-
     def _pose_features(self, obs_extra, obj_xytheta):
         """TCP xy, and TCP position in the T's body frame, for logging/plots."""
         obj_x, obj_y, yaw = obj_xytheta
-        tcp = to_numpy(obs_extra["tcp_pose"])[0]
-        dx, dy = float(tcp[0]) - obj_x, float(tcp[1]) - obj_y
+        tcp = to_numpy(obs_extra["tcp_pose"])[0]        # (7, )
+        tcp_x, tcp_y = float(tcp[0]), float(tcp[1])
+        dx, dy = tcp_x - obj_x, tcp_y - obj_y
         c, s = np.cos(yaw), np.sin(yaw)
-        tcp_xy = np.array([tcp[0], tcp[1]], dtype=np.float64)
+        tcp_xy = np.array([tcp_x, tcp_y], dtype=np.float64)
         rel_xy = np.array([c * dx + s * dy, -s * dx + c * dy], dtype=np.float64)
         return tcp_xy, rel_xy
 
@@ -202,23 +186,7 @@ class RRTPlanner:
         return to_numpy(self.env.unwrapped.goal_tee.pose.raw_pose).reshape(-1).astype(np.float64)
 
     def _is_better_inter(self, candidate, incumbent):
-        if candidate.intersection > incumbent.intersection:
-            return True
-        if candidate.intersection < incumbent.intersection:
-            return False
-        return candidate.g_value < incumbent.g_value
-
-    def _is_better_h(self, candidate, incumbent):
-        if candidate.h_value < incumbent.h_value:
-            return True
-        if candidate.h_value > incumbent.h_value:
-            return False
-        return candidate.g_value < incumbent.g_value
-
-    def _pick_fallback(self, root_node, best_inter_node, best_h_node):
-        if best_inter_node.intersection > root_node.intersection:
-            return best_inter_node
-        return best_h_node
+        return candidate.intersection > incumbent.intersection
 
     def _sample_target(self):
         if np.random.rand() < self.goal_bias:
@@ -240,7 +208,13 @@ class RRTPlanner:
 
     def _expand(self, nearest_node, target_xytheta, target_landmarks):
         nearest_xy = np.array(nearest_node.key[:2], dtype=np.float64)
-        direction = np.array(target_xytheta[:2], dtype=np.float64) - nearest_xy
+        tcp_to_obj = nearest_xy - nearest_node.tcp_xy
+        if float(np.linalg.norm(tcp_to_obj)) > self.tcp_engage_radius:
+            # TCP isn't near the T -- aim candidates back at it instead of
+            # toward the target, which the TCP's own position never enters.
+            direction = tcp_to_obj
+        else:
+            direction = np.array(target_xytheta[:2], dtype=np.float64) - nearest_xy
         base_angle = float(np.arctan2(direction[1], direction[0]))
 
         angles = base_angle + np.random.normal(0.0, self.angle_jitter_scale, size=self.n_candidates)
@@ -250,6 +224,7 @@ class RRTPlanner:
         )
 
         best_dist = np.inf
+        best_tcp_to_obj = np.inf
         best_state, best_obj_xytheta, best_obs_extra, best_action = None, None, None, None
 
         for angle, magnitude in zip(angles, magnitudes):
@@ -268,9 +243,20 @@ class RRTPlanner:
             obj_xytheta = self._obj_xytheta(obs_extra)
             candidate_landmarks = self._landmarks_world_xy(*obj_xytheta)
             dist = float(np.linalg.norm(candidate_landmarks - target_landmarks, axis=-1).max())
+            tcp = to_numpy(obs_extra["tcp_pose"])[0]
+            tcp_to_obj = float(np.linalg.norm(tcp[:2] - np.array(obj_xytheta[:2])))
 
-            if dist < best_dist:
+            # Primary: get closer to the target. Candidates within
+            # CANDIDATE_TIE_EPS of the current best made essentially the same
+            # object progress (typically: none of them touched the T), so the
+            # tiebreak falls back to whichever leaves the TCP nearer the
+            # object -- the only real difference between them.
+            better = dist < best_dist - CANDIDATE_TIE_EPS or (
+                dist <= best_dist + CANDIDATE_TIE_EPS and tcp_to_obj < best_tcp_to_obj
+            )
+            if better:
                 best_dist = dist
+                best_tcp_to_obj = tcp_to_obj
                 best_state = self._clone_state(self.env.unwrapped.get_state())
                 best_obj_xytheta = obj_xytheta
                 best_obs_extra = obs_extra
@@ -280,11 +266,6 @@ class RRTPlanner:
         # whichever candidate ran last, so restore it before reading intersection.
         self.env.unwrapped.set_state(best_state)
         inter = self._intersection()
-        h_value = self._heuristic(best_obs_extra)
-        # Edge cost = actual worst-corner displacement of the T between parent
-        # and child (same metric as _landmark_dist), not a flat per-step cost.
-        step_cost = self._landmark_dist(nearest_node.key, best_obj_xytheta)
-        g_value = nearest_node.g_value + step_cost
         tcp_xy, rel_xy = self._pose_features(best_obs_extra, best_obj_xytheta)
 
         return RRTNode(
@@ -292,8 +273,6 @@ class RRTPlanner:
             nearest_node,
             best_action,
             best_obj_xytheta,
-            g_value,
-            h_value,
             inter,
             tcp_xy,
             rel_xy,
@@ -342,7 +321,7 @@ class RRTPlanner:
         self,
         max_iters=2000,
         threshold_value=None,
-        plot_path=COVERAGE_PLOT_PATH,
+        plot_path=_DEFAULT_COVERAGE_PLOT_PATH,
         recorder=None,
         extra_params=None,
         resume=None,
@@ -361,10 +340,9 @@ class RRTPlanner:
         obs_extra = self.env.unwrapped.get_obs()["extra"]
         root_key = self._obj_xytheta(obs_extra)
         root_inter = self._intersection()
-        root_h = self._heuristic(obs_extra)
         root_tcp_xy, root_rel_xy = self._pose_features(obs_extra, root_key)
         root_node = RRTNode(
-            root_state, None, None, root_key, 0.0, root_h, root_inter, root_tcp_xy, root_rel_xy
+            root_state, None, None, root_key, root_inter, root_tcp_xy, root_rel_xy
         )
         start_pose = self._obj_raw_pose(obs_extra)
         goal_pose = self._goal_raw_pose()
@@ -381,7 +359,7 @@ class RRTPlanner:
             )
 
         if resume is not None:
-            nodes, keys_xy, keys_theta, best_inter_node, best_h_node = resume.restore(
+            nodes, keys_xy, keys_theta, best_inter_node = resume.restore(
                 RRTNode, like=root_state
             )
             count = len(nodes)
@@ -398,7 +376,6 @@ class RRTPlanner:
             keys_theta[0] = root_key[2]
             count = 1
             best_inter_node = root_node
-            best_h_node = root_node
 
         start_time = time.time()
         coverage_history = [(0.0, root_node.intersection)]
@@ -420,7 +397,7 @@ class RRTPlanner:
                 rec.log_root(root_node)
 
             while count <= max_iters and not rec.stop_requested:
-                checkpointer.tick(nodes, best_inter_node, best_h_node)
+                checkpointer.tick(nodes, best_inter_node)
 
                 target = self._sample_target()
                 target_landmarks = self._landmarks_world_xy(*target)
@@ -436,11 +413,9 @@ class RRTPlanner:
 
                 if self._is_better_inter(child, best_inter_node):
                     best_inter_node = child
-                if self._is_better_h(child, best_h_node):
-                    best_h_node = child
 
                 coverage_history.append((time.time() - start_time, best_inter_node.intersection))
-                rec.inserted(child, nearest_idx, best_h_node, best_inter_node, count)
+                rec.inserted(child, nearest_idx, best_inter_node, count)
 
                 if child.intersection >= threshold_value:
                     rec.goal_reached(child, count)
@@ -449,15 +424,15 @@ class RRTPlanner:
                     break
 
             if result_node is None:
-                result_node = self._pick_fallback(root_node, best_inter_node, best_h_node)
+                result_node = best_inter_node
                 if rec.stop_requested:
-                    rec.interrupted(best_inter_node, best_h_node, len(self._extract_path(result_node)))
+                    rec.interrupted(best_inter_node, len(self._extract_path(result_node)))
                 else:
-                    rec.exhausted(best_inter_node, best_h_node, len(self._extract_path(result_node)))
+                    rec.exhausted(best_inter_node, len(self._extract_path(result_node)))
 
             log = rec.finish(result_node, goal_reached, count)
 
-        checkpointer.save(nodes, best_inter_node, best_h_node, goal_reached=goal_reached)
+        checkpointer.save(nodes, best_inter_node, goal_reached=goal_reached)
 
         self.env.unwrapped.set_state(root_state)
         self._save_coverage_plot(coverage_history, plot_path)
@@ -481,200 +456,3 @@ class RRTPlanner:
                 self.env.render()
                 if step_delay > 0:
                     time.sleep(step_delay)
-
-
-if __name__ == "__main__":
-    import argparse
-
-    import gymnasium as gym
-    import mani_skill.envs  # noqa: F401
-
-    ENV_KWARGS = dict(obs_mode="state_dict", control_mode="pd_ee_delta_pose")
-    K_SUBSTEPS = 10
-    STEP_SIZE = 0.5
-
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--max-iters", type=int, default=5000, help="Maximum RRT iterations (default: 5000)"
-    )
-    parser.add_argument(
-        "--threshold",
-        type=float,
-        default=None,
-        help="Intersection success threshold (default: env's intersection_thresh)",
-    )
-    parser.add_argument(
-        "--goal-bias",
-        type=float,
-        default=0.1,
-        help="Probability of sampling the goal as the RRT target (default: 0.1)",
-    )
-    parser.add_argument(
-        "--n-candidates",
-        type=int,
-        default=8,
-        help="Candidate directions sampled (and simulated serially on CPU) "
-        "per RRT expansion (default: 8)",
-    )
-    parser.add_argument(
-        "--save-video",
-        action="store_true",
-        help="Record the final replay to an mp4 instead of opening an interactive "
-        "window. Replays inside the SAME sim instance that found the plan (not a "
-        "freshly-constructed env) -- a fresh instance is not guaranteed to "
-        "reproduce the same physical outcome, see scripts/check_replay_intersection.py.",
-    )
-    parser.add_argument(
-        "--video-dir",
-        type=str,
-        default="videos",
-        help="Directory to save the replay video to when --save-video is set (default: videos)",
-    )
-    parser.add_argument(
-        "--env-seed",
-        type=int,
-        default=0,
-        help="Env reset seed -- controls the T/goal/robot starting layout (default: 0)",
-    )
-    parser.add_argument(
-        "--rng-seed",
-        type=int,
-        default=None,
-        help="numpy RNG seed for RRT's target/candidate sampling (default: random, "
-        "but it's always printed and saved so a good run can be reproduced later "
-        "with --rng-seed <value>)",
-    )
-    parser.add_argument(
-        "--resume",
-        nargs="?",
-        type=Path,
-        const=CHECKPOINT_PATH,
-        default=None,
-        metavar="PATH",
-        help="Continue a checkpointed search instead of starting from the root. "
-        "--max-iters is the total budget, so resuming a 5000-node checkpoint "
-        f"with 10000 runs 5000 more (default: {CHECKPOINT_PATH})",
-    )
-    parser.add_argument(
-        "--checkpoint",
-        type=Path,
-        default=CHECKPOINT_PATH,
-        help=f"Where to write the search checkpoint (default: {CHECKPOINT_PATH})",
-    )
-    parser.add_argument(
-        "--checkpoint-every",
-        type=int,
-        default=1000,
-        metavar="N",
-        help="Autosave every N tree nodes; 0 saves only at the end (default: 1000)",
-    )
-    parser.add_argument(
-        "--force",
-        action="store_true",
-        help="Resume even if the search parameters or heuristic have changed",
-    )
-    args = parser.parse_args()
-
-    # Locked in below via np.random.seed() -- drawn from the ambient (unseeded)
-    # state first if the user didn't pin one, so every run still gets genuine
-    # randomness by default while still being reproducible after the fact.
-    rng_seed = args.rng_seed if args.rng_seed is not None else int(np.random.randint(0, 2**31 - 1))
-    np.random.seed(rng_seed)
-    print(f"env_seed={args.env_seed} rng_seed={rng_seed}")
-
-    # rgb_array costs nothing extra during planning (render() is never called
-    # mid-search) but lets us record the final replay in this exact instance.
-    plan_render_mode = "rgb_array" if args.save_video else None
-    plan_env = gym.make("PushT-v1", **ENV_KWARGS, render_mode=plan_render_mode)
-    plan_env.reset(seed=args.env_seed)
-
-    verify_set_state_determinism(plan_env)
-    plan_env.reset(seed=args.env_seed)  # discard the warmup/check rollout, start planning clean
-
-    initial_state = plan_env.unwrapped.get_state().clone()
-
-    planner = RRTPlanner(
-        plan_env,
-        K_substeps=K_SUBSTEPS,
-        step_size=STEP_SIZE,
-        goal_bias=args.goal_bias,
-        n_candidates=args.n_candidates,
-        allow_render=args.save_video,
-    )
-
-    threshold_value = (
-        args.threshold if args.threshold is not None else float(plan_env.unwrapped.intersection_thresh)
-    )
-    # Reads the env's current (post-reset) state as the search root, so this
-    # has to happen before planning starts.
-    search_id = fingerprint(planner, threshold_value)
-
-    resume = None
-    if args.resume:
-        resume = load_checkpoint(args.resume, search_id, force=args.force)
-        print(f"Resuming {args.resume} at {resume.count} nodes")
-
-    recorder = RRTRecorder()
-    checkpointer = Checkpointer(args.checkpoint, search_id, recorder, every=args.checkpoint_every)
-
-    result = planner.plan(
-        max_iters=args.max_iters,
-        threshold_value=threshold_value,
-        extra_params={"env_seed": args.env_seed, "rng_seed": rng_seed},
-        recorder=recorder,
-        resume=resume,
-        checkpointer=checkpointer,
-    )
-    plan = result.actions
-    print(f"Plan length: {len(plan)}")
-
-    save_plan(PLAN_PATH, plan)
-    print(f"Saved plan to {PLAN_PATH}")
-
-    save_plan_result(result, RESULT_NPZ_PATH)
-    print(f"Saved plan arrays to {RESULT_NPZ_PATH}")
-
-    heatmap_path = plot_expansion_heatmap(result)
-    print(f"Saved expansion heatmap to {heatmap_path}")
-    print(
-        f"Search further with: uv run rrt_planner.py --resume {args.checkpoint} "
-        f"--max-iters {args.max_iters * 2} --env-seed {args.env_seed} --rng-seed {rng_seed}"
-    )
-
-    if args.save_video:
-        from mani_skill.utils.wrappers.record import RecordEpisode
-
-        # Wrap (not recreate) plan_env: same underlying sim instance/state history
-        # that the search actually produced `plan` from.
-        plan_env = RecordEpisode(
-            plan_env, output_dir=args.video_dir, save_trajectory=False, save_video=True
-        )
-        plan_env.reset(seed=args.env_seed)
-        plan_env.unwrapped.set_state(initial_state)
-
-        replay_planner = RRTPlanner(
-            plan_env, K_substeps=K_SUBSTEPS, step_size=STEP_SIZE, allow_render=True
-        )
-        replay_planner.execute_plan(initial_state, plan, step_delay=0.0)
-        plan_env.close()
-        print(f"Saved replay video under {args.video_dir}/")
-    else:
-        plan_env.close()
-        render_env = gym.make("PushT-v1", **ENV_KWARGS, render_mode="human")
-        render_env.reset(seed=args.env_seed)
-        render_planner = RRTPlanner(
-            render_env, K_substeps=K_SUBSTEPS, step_size=STEP_SIZE, allow_render=True
-        )
-        render_planner.execute_plan(initial_state, plan, step_delay=0.05)
-
-        print("Replay finished. Press Enter in this terminal to close the window...")
-        while True:
-            render_env.render()
-            try:
-                import msvcrt
-                if msvcrt.kbhit() and msvcrt.getch() in (b"\r", b"\n"):
-                    break
-            except ImportError:
-                input()
-                break
-        render_env.close()

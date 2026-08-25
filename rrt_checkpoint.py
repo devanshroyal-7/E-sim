@@ -4,9 +4,9 @@ RRT has no open/closed split: every node in the tree, not just some frontier,
 can be picked as a nearest neighbor for a future expansion, so a checkpoint
 stores the whole tree table rather than a subset of it. Each row already
 carries the sim_state `env.set_state()` needs and its parent's row index, so
-resuming needs no re-expansion -- nearest-neighbor search and the two
-incumbents (best_inter_node, best_h_node) all fall out of the restored table
-directly, and any node's full action path is just a walk up `parent`.
+resuming needs no re-expansion -- nearest-neighbor search and the incumbent
+(best_inter_node) both fall out of the restored table directly, and any
+node's full action path is just a walk up `parent`.
 
 `Checkpointer` is the hook the planner calls, in the same shape as
 `RRTRecorder`: a `tick` per iteration that usually does nothing, a `save`, and
@@ -30,11 +30,9 @@ from tqdm import tqdm
 from geometry import TEE_LANDMARKS_XY, to_numpy
 
 # Methods whose source is hashed into the fingerprint: between them they define
-# g, h and the nearest-neighbor metric, which is everything that decides how
-# the tree grows and which nodes look best.
+# the nearest-neighbor metric and the candidate tiebreak, which is everything
+# that decides how the tree grows and which nodes look best.
 FINGERPRINTED_METHODS = (
-    "_heuristic",
-    "_landmark_dist",
     "_pose_features",
     "_expand",
 )
@@ -116,7 +114,6 @@ class RRTCheckpoint:
     fingerprint: dict
     nodes: dict  # column -> array, one row per tree node, in insertion order
     best_inter_idx: int
-    best_h_idx: int
     count: int
     goal_reached: bool
     recorder: dict  # log table and counters, opaque here
@@ -136,17 +133,15 @@ class RRTCheckpoint:
             keys_xy,
             keys_theta,
             nodes[self.best_inter_idx],
-            nodes[self.best_h_idx],
         )
 
 
-def _capture(nodes, best_inter_node, best_h_node, recorder, fingerprint, goal_reached):
+def _capture(nodes, best_inter_node, recorder, fingerprint, goal_reached):
     index_of = {id(node): i for i, node in enumerate(nodes)}
     return RRTCheckpoint(
         fingerprint=dict(fingerprint),
         nodes=_pack_nodes(nodes),
         best_inter_idx=index_of[id(best_inter_node)],
-        best_h_idx=index_of[id(best_h_node)],
         count=len(nodes),
         goal_reached=bool(goal_reached),
         recorder=recorder.checkpoint_state(),
@@ -175,8 +170,6 @@ def _pack_nodes(nodes):
             ]
         ),
         "key": np.array([n.key for n in nodes], dtype=np.float64),
-        "g": np.array([n.g_value for n in nodes], dtype=np.float64),
-        "h": np.array([n.h_value for n in nodes], dtype=np.float64),
         "intersection": np.array([n.intersection for n in nodes], dtype=np.float64),
         "tcp_xy": np.stack([np.asarray(n.tcp_xy, dtype=np.float64) for n in nodes]),
         "rel_xy": np.stack([np.asarray(n.rel_xy, dtype=np.float64) for n in nodes]),
@@ -184,7 +177,7 @@ def _pack_nodes(nodes):
 
 
 def _unpack_nodes(columns, node_cls, like):
-    n = len(columns["g"])
+    n = len(columns["intersection"])
     parents = columns["parent"]
     nodes = [None] * n
     for i in range(n):
@@ -196,8 +189,6 @@ def _unpack_nodes(columns, node_cls, like):
             parent,
             action,
             tuple(columns["key"][i].tolist()),
-            float(columns["g"][i]),
-            float(columns["h"][i]),
             float(columns["intersection"][i]),
             columns["tcp_xy"][i].astype(np.float64),
             columns["rel_xy"][i].astype(np.float64),
@@ -220,7 +211,6 @@ def _as_sim_state(row, like):
 def save_checkpoint(checkpoint, path):
     arrays = {
         "best_inter_idx": np.asarray(checkpoint.best_inter_idx),
-        "best_h_idx": np.asarray(checkpoint.best_h_idx),
         "ctr__count": np.asarray(checkpoint.count),
         "ctr__goal_reached": np.asarray(int(checkpoint.goal_reached)),
     }
@@ -256,7 +246,6 @@ def load_checkpoint(path, fingerprint=None, force=False):
         fingerprint=saved,
         nodes=section("node__"),
         best_inter_idx=int(data["best_inter_idx"]),
-        best_h_idx=int(data["best_h_idx"]),
         count=int(counters["count"]),
         goal_reached=bool(counters["goal_reached"]),
         recorder={
@@ -279,18 +268,18 @@ class Checkpointer:
         self.every = int(every)
         self._last_saved = None
 
-    def tick(self, nodes, best_inter_node, best_h_node):
+    def tick(self, nodes, best_inter_node):
         count = len(nodes)
         if self._last_saved is None:
             # Anchor on where this run started, so a resume does not immediately
             # rewrite the checkpoint it was just loaded from.
             self._last_saved = count
         elif self.every and count - self._last_saved >= self.every:
-            self.save(nodes, best_inter_node, best_h_node)
+            self.save(nodes, best_inter_node)
 
-    def save(self, nodes, best_inter_node, best_h_node, goal_reached=False):
+    def save(self, nodes, best_inter_node, goal_reached=False):
         checkpoint = _capture(
-            nodes, best_inter_node, best_h_node, self.recorder, self.fingerprint, goal_reached
+            nodes, best_inter_node, self.recorder, self.fingerprint, goal_reached
         )
         save_checkpoint(checkpoint, self.path)
         self._last_saved = len(nodes)
@@ -303,8 +292,8 @@ class Checkpointer:
 class NullCheckpointer:
     """Same hooks as `Checkpointer`, writing nothing."""
 
-    def tick(self, nodes, best_inter_node, best_h_node):
+    def tick(self, nodes, best_inter_node):
         pass
 
-    def save(self, nodes, best_inter_node, best_h_node, goal_reached=False):
+    def save(self, nodes, best_inter_node, goal_reached=False):
         pass

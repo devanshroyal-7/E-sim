@@ -19,8 +19,6 @@ from tqdm import tqdm
 from search_log import ColumnLog, SearchLog
 
 EXPANSION_COLUMNS = (
-    "g",
-    "h",
     "intersection",
     "parent",
     "obj_x",
@@ -30,7 +28,6 @@ EXPANSION_COLUMNS = (
     "tcp_y",
     "rel_x",
     "rel_y",
-    "best_h",
     "best_intersection",
     "tree_size",
     "elapsed",
@@ -119,11 +116,9 @@ class RRTRecorder:
         finally:
             signal.signal(signal.SIGINT, previous)
 
-    def _add_row(self, node, parent_idx, best_h_node, best_inter_node, tree_size):
+    def _add_row(self, node, parent_idx, best_inter_node, tree_size):
         obj_x, obj_y, obj_yaw = node.key
         self.expansion_log.add(
-            g=node.g_value,
-            h=node.h_value,
             intersection=node.intersection,
             parent=parent_idx,
             obj_x=obj_x,
@@ -133,7 +128,6 @@ class RRTRecorder:
             tcp_y=node.tcp_xy[1],
             rel_x=node.rel_xy[0],
             rel_y=node.rel_xy[1],
-            best_h=best_h_node.h_value,
             best_intersection=best_inter_node.intersection,
             tree_size=tree_size,
             elapsed=self._elapsed(),
@@ -142,16 +136,15 @@ class RRTRecorder:
     def log_root(self, root_node):
         """Row 0 of the expansion table, so `parent` indices are self-consistent
         (they index into this table, and the root's own children point at 0)."""
-        self._add_row(root_node, -1, root_node, root_node, 1)
+        self._add_row(root_node, -1, root_node, 1)
 
-    def inserted(self, node, parent_idx, best_h_node, best_inter_node, tree_size):
+    def inserted(self, node, parent_idx, best_inter_node, tree_size):
         if self._bar is not None:
             self._bar.update(1)
-        self._add_row(node, parent_idx, best_h_node, best_inter_node, tree_size)
+        self._add_row(node, parent_idx, best_inter_node, tree_size)
         if self._bar is not None:
             self._bar.set_postfix(
                 best_inter=f"{best_inter_node.intersection:.4f}",
-                best_h=f"{best_h_node.h_value:.4f}",
                 tree=tree_size,
             )
 
@@ -161,19 +154,17 @@ class RRTRecorder:
             f"(intersection={node.intersection:.4f})"
         )
 
-    def exhausted(self, best_inter_node, best_h_node, returned_depth):
+    def exhausted(self, best_inter_node, returned_depth):
         tqdm.write(
             "Max iters reached. Returning trajectory for the closest node "
             f"(best_intersection={best_inter_node.intersection:.4f}, "
-            f"best_h={best_h_node.h_value:.4f}, "
             f"returned_depth={returned_depth})"
         )
 
-    def interrupted(self, best_inter_node, best_h_node, returned_depth):
+    def interrupted(self, best_inter_node, returned_depth):
         tqdm.write(
             "Interrupted. Returning trajectory for the closest node so far "
             f"(best_intersection={best_inter_node.intersection:.4f}, "
-            f"best_h={best_h_node.h_value:.4f}, "
             f"returned_depth={returned_depth})"
         )
 
@@ -195,7 +186,6 @@ class RRTRecorder:
                 "max_iters": self.max_iters,
                 "wall_time_s": self._elapsed(),
                 "goal_reached": int(goal_reached),
-                "root_h": self.root.h_value,
                 "root_intersection": self.root.intersection,
                 **self.params,
             },
@@ -220,16 +210,16 @@ class NullRRTRecorder:
     def log_root(self, root_node):
         pass
 
-    def inserted(self, node, parent_idx, best_h_node, best_inter_node, tree_size):
+    def inserted(self, node, parent_idx, best_inter_node, tree_size):
         pass
 
     def goal_reached(self, node, tree_size):
         pass
 
-    def exhausted(self, best_inter_node, best_h_node, returned_depth):
+    def exhausted(self, best_inter_node, returned_depth):
         pass
 
-    def interrupted(self, best_inter_node, best_h_node, returned_depth):
+    def interrupted(self, best_inter_node, returned_depth):
         pass
 
     def expansion_xy(self):
