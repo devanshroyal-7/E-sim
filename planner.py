@@ -10,7 +10,7 @@ from search_checkpoint import NullCheckpointer
 from search_recorder import SearchRecorder
 
 G_STEP_COST = 0.1
-H_WEIGHT = 1.0
+H_WEIGHT = 5.0
 
 # State-key resolution: object xy to 1 cm, tee yaw to 5 deg bins.
 STATE_KEY_XY_DECIMALS = 2
