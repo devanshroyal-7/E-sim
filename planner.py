@@ -11,6 +11,8 @@ from search_recorder import SearchRecorder
 
 G_STEP_COST = 0.1
 H_WEIGHT = 5.0
+REACH_SCALE = 1/0.0947
+ZERO_ACTIONS = 2
 
 # State-key resolution: object xy to 1 cm, tee yaw to 5 deg bins.
 STATE_KEY_XY_DECIMALS = 2
@@ -91,7 +93,7 @@ class SimPlanner:
 
         pose_err = float(np.max(np.linalg.norm(current - self.goal_landmarks, axis=-1)))
         reach = max(0, float(np.linalg.norm(obj_xy - tcp_xy) - TEE_CIRCUMRADIUS))
-        return pose_err + reach
+        return pose_err + REACH_SCALE * reach
 
     def _pose_features(self, obs_extra):
         """Object / TCP quantities shared by the state key and the search log."""
@@ -302,6 +304,10 @@ class SimPlanner:
                     for _ in range(self.K):
                         self.env.step(action)
 
+                    zeros = np.zeros_like(action)
+                    for _ in range(ZERO_ACTIONS):
+                        self.env.step(zeros)
+                    
                     child_state = self._clone_state(self.env.unwrapped.get_state())
                     child_obs = self.env.unwrapped.get_obs()
                     child_obs_extra = child_obs["extra"]
@@ -398,6 +404,14 @@ class SimPlanner:
 
             for _ in range(K):
                 self.env.step(action)
+                self.env.render()
+                if step_delay > 0:
+                    time.sleep(step_delay)
+
+
+            zeros = np.zeros_like(action)
+            for _ in range(ZERO_ACTIONS):
+                self.env.step(zeros)
                 self.env.render()
                 if step_delay > 0:
                     time.sleep(step_delay)
