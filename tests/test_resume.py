@@ -18,7 +18,7 @@ ENV_KWARGS = dict(obs_mode="state_dict", control_mode="pd_ee_delta_pose")
 K_SUBSTEPS = 10
 STEP_SIZE = 0.2
 THRESHOLD = 0.90
-SPLIT, TOTAL = 60, 120
+SPLIT, TOTAL = 15, 30
 
 
 def _plan(max_expansions, checkpoint_path, resume_path=None):

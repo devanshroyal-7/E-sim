@@ -12,7 +12,6 @@ from search_recorder import SearchRecorder
 G_STEP_COST = 0.1
 H_WEIGHT = 5.0
 REACH_SCALE = 1/0.0947
-ZERO_ACTIONS = 2
 
 # State-key resolution: object xy to 1 cm, tee yaw to 5 deg bins.
 STATE_KEY_XY_DECIMALS = 2
@@ -137,6 +136,22 @@ class SimPlanner:
             return state.clone()
         return np.array(state, copy=True)
 
+    def _apply_primitive(self, action, *, K=None, render=False, step_delay=0.0):
+        """One open-loop primitive: K env steps of `action`. No hold / zeros."""
+        K = self.K if K is None else K
+        for _ in range(K):
+            self.env.step(action)
+            if render:
+                self.env.render()
+                if step_delay > 0:
+                    time.sleep(step_delay)
+
+    def _rollout_from_root(self, root_state, actions):
+        """Replay `actions` from the episode root. Rebuilds contact along the tape."""
+        self.env.unwrapped.set_state(root_state)
+        for act_idx in actions:
+            self._apply_primitive(self.action_primitives[act_idx])
+
     def _is_better_inter_node(
         self, candidate: SearchNode, incumbent: SearchNode
     ) -> bool:
@@ -179,9 +194,7 @@ class SimPlanner:
         self.env.unwrapped.set_state(root_state)
         pts = [self._obj_xy_from_obs(self.env.unwrapped.get_obs()["extra"])]
         for act_idx in actions:
-            action = self.action_primitives[act_idx]
-            for _ in range(self.K):
-                self.env.step(action)
+            self._apply_primitive(self.action_primitives[act_idx])
             pts.append(self._obj_xy_from_obs(self.env.unwrapped.get_obs()["extra"]))
         return np.asarray(pts, dtype=np.float64)
 
@@ -274,7 +287,7 @@ class SimPlanner:
                 expansion_idx = expansions
                 expansions += 1
 
-                self.env.unwrapped.set_state(current_node.sim_state)
+                self._rollout_from_root(root_state, current_node.action_history)
                 current_obs = self.env.unwrapped.get_obs()
                 current_obs_extra = current_obs["extra"]
                 current_features = self._pose_features(current_obs_extra)
@@ -299,15 +312,9 @@ class SimPlanner:
                     break
 
                 for act_idx, action in enumerate(self.action_primitives):
-                    self.env.unwrapped.set_state(current_node.sim_state)
+                    self._rollout_from_root(root_state, current_node.action_history)
+                    self._apply_primitive(action)
 
-                    for _ in range(self.K):
-                        self.env.step(action)
-
-                    zeros = np.zeros_like(action)
-                    for _ in range(ZERO_ACTIONS):
-                        self.env.step(zeros)
-                    
                     child_state = self._clone_state(self.env.unwrapped.get_state())
                     child_obs = self.env.unwrapped.get_obs()
                     child_obs_extra = child_obs["extra"]
@@ -400,18 +407,9 @@ class SimPlanner:
         self.env.unwrapped.set_state(initial_state)
 
         for act_idx in tqdm(plan_action_indicies, desc="Executing", unit="prim"):
-            action = primitives[act_idx]
-
-            for _ in range(K):
-                self.env.step(action)
-                self.env.render()
-                if step_delay > 0:
-                    time.sleep(step_delay)
-
-
-            zeros = np.zeros_like(action)
-            for _ in range(ZERO_ACTIONS):
-                self.env.step(zeros)
-                self.env.render()
-                if step_delay > 0:
-                    time.sleep(step_delay)
+            self._apply_primitive(
+                primitives[act_idx],
+                K=K,
+                render=True,
+                step_delay=step_delay,
+            )
