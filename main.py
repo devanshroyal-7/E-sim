@@ -31,6 +31,7 @@ ENV_KWARGS = dict(
 )
 K_SUBSTEPS = 10
 STEP_SIZE = 0.2
+RRT_STEP_SIZE = 0.3
 SEED = 0
 PLAN_PATH = Path(__file__).resolve().parent / "last_plan.txt"
 RESULT_NPZ_PATH = Path(__file__).resolve().parent / "last_plan_result.npz"
@@ -134,9 +135,11 @@ def run_rrt(args):
     planner = RRTPlanner(
         plan_env,
         K_substeps=K_SUBSTEPS,
-        step_size=STEP_SIZE,
+        step_size=RRT_STEP_SIZE,
         goal_bias=args.goal_bias,
         n_candidates=args.n_candidates,
+        reposition_prob=args.reposition_prob,
+        max_extra_contacts=args.max_extra_contacts,
     )
 
     search_id = rrt_fingerprint(planner, args.threshold)
@@ -270,6 +273,22 @@ def main():
         type=int,
         default=8,
         help="[rrt only] Candidate directions sampled per RRT expansion (default: 8)",
+    )
+    parser.add_argument(
+        "--reposition-prob",
+        type=float,
+        default=0.5,
+        help=(
+            "[rrt only] Probability of attempting a reposition move (lift the "
+            "end-effector to a different contact point on the T) instead of an "
+            "extend each iteration (default: 0.5)"
+        ),
+    )
+    parser.add_argument(
+        "--max-extra-contacts",
+        type=int,
+        default=4,
+        help="[rrt only] Max additional contact points remembered per tree node (default: 4)",
     )
     parser.add_argument(
         "--rng-seed",

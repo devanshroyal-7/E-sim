@@ -50,6 +50,8 @@ class RRTRecorder:
         self._elapsed_offset = 0.0
         self._resumed = False
         self._bar = None
+        self.reposition_attempts = 0
+        self.reposition_successes = 0
 
     def resume_from(self, checkpoint):
         """Reopen a checkpoint's table so this run appends to it: row indices
@@ -57,21 +59,32 @@ class RRTRecorder:
         state = checkpoint.recorder
         self.expansion_log = ColumnLog.from_arrays(EXPANSION_COLUMNS, state["expansions"])
         self._elapsed_offset = float(state["counters"]["elapsed_s"])
+        self.reposition_attempts = int(state["counters"].get("reposition_attempts", 0))
+        self.reposition_successes = int(state["counters"].get("reposition_successes", 0))
         self._resumed = True
 
     def checkpoint_state(self):
         """The half of a checkpoint the recorder owns."""
         return {
             "expansions": self.expansion_log.arrays(),
-            "counters": {"elapsed_s": self._elapsed()},
+            "counters": {
+                "elapsed_s": self._elapsed(),
+                "reposition_attempts": self.reposition_attempts,
+                "reposition_successes": self.reposition_successes,
+            },
         }
 
     def _elapsed(self):
         return self._elapsed_offset + time.perf_counter() - self._t0
 
     @contextmanager
-    def run(self, max_iters, params, root):
-        """Own the progress bar and the interrupt for the search loop."""
+    def run(self, max_iters, params, root, initial_iters=0):
+        """Own the progress bar and the interrupt for the search loop.
+
+        `initial_iters` is the loop's own iteration count (expand attempts +
+        reposition attempts), so the bar advances 1:1 with the loop's own
+        `iters < max_iters` condition instead of lagging behind whenever a
+        stretch of iterations goes to repositions rather than expansions."""
         if self._resumed:
             self._resumed = False
         else:
@@ -83,7 +96,7 @@ class RRTRecorder:
         self._t0 = time.perf_counter()
         with tqdm(
             total=max_iters,
-            initial=max(len(self.expansion_log) - 1, 0),
+            initial=initial_iters,
             desc="RRT Planning",
             unit="iter",
         ) as bar:
@@ -148,9 +161,16 @@ class RRTRecorder:
                 tree=tree_size,
             )
 
-    def goal_reached(self, node, tree_size):
+    def repositioned(self, node, node_idx, success):
+        if self._bar is not None:
+            self._bar.update(1)
+        self.reposition_attempts += 1
+        if success:
+            self.reposition_successes += 1
+
+    def goal_reached(self, node, tree_size, iters):
         tqdm.write(
-            f"Goal reached in {tree_size - 1} iterations "
+            f"Goal reached in {iters} iterations ({tree_size - 1} expansions) "
             f"(intersection={node.intersection:.4f})"
         )
 
@@ -177,12 +197,15 @@ class RRTRecorder:
             np.float64
         )
 
-    def finish(self, result_node, goal_reached, tree_size):
+    def finish(self, result_node, goal_reached, tree_size, iters):
         return SearchLog(
             expansions=self.expansion_log.arrays(),
             edges={},
             summary={
-                "iterations": tree_size - 1,
+                "iterations": iters,
+                "expansions": tree_size - 1,
+                "reposition_attempts": self.reposition_attempts,
+                "reposition_successes": self.reposition_successes,
                 "max_iters": self.max_iters,
                 "wall_time_s": self._elapsed(),
                 "goal_reached": int(goal_reached),
@@ -213,7 +236,10 @@ class NullRRTRecorder:
     def inserted(self, node, parent_idx, best_inter_node, tree_size):
         pass
 
-    def goal_reached(self, node, tree_size):
+    def repositioned(self, node, node_idx, success):
+        pass
+
+    def goal_reached(self, node, tree_size, iters):
         pass
 
     def exhausted(self, best_inter_node, returned_depth):
@@ -225,5 +251,5 @@ class NullRRTRecorder:
     def expansion_xy(self):
         return np.zeros((0, 2), dtype=np.float64)
 
-    def finish(self, result_node, goal_reached, tree_size):
+    def finish(self, result_node, goal_reached, tree_size, iters):
         return None

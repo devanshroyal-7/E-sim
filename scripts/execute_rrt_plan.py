@@ -15,6 +15,7 @@ import mani_skill.envs
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from rrt_planner import RRTPlanner, load_plan
+from geometry import to_numpy
 
 ENV_KWARGS = dict(
     obs_mode="state_dict",
@@ -78,6 +79,9 @@ def main():
         f"  seed={args.seed} K={args.k_substeps} delay={args.delay}s"
     )
     planner.execute_plan(initial_state, plan, step_delay=args.delay, K=args.k_substeps)
+
+    inter = float(to_numpy(env.unwrapped.pseudo_render_intersection()).reshape(-1)[0])
+    print(f"Final intersection: {inter:.4f}")
 
     if args.hold > 0:
         time.sleep(args.hold)
